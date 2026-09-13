@@ -8,7 +8,7 @@ use gpui::{
 };
 
 use crate::{
-    ActiveTheme, ElementExt,
+    ElementExt,
     async_util::{Receiver, Sender, unbounded},
     highlighter::HighlightTheme,
     input::{self, SelectAll},
@@ -61,6 +61,7 @@ pub struct TextViewState {
     pub(super) scrollable: bool,
     pub(super) text_view_style: TextViewStyle,
     pub(super) code_block_actions: Option<std::sync::Arc<CodeBlockActionsFn>>,
+    pub(super) interactions: super::interaction::TextViewInteractions,
     pub(super) markdown_extensions: Arc<MarkdownExtensions>,
 
     pub(super) is_selecting: bool,
@@ -81,19 +82,39 @@ pub struct TextViewState {
     _receive_task: Task<()>,
 }
 
+impl gpui::Focusable for TextViewState {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
 impl TextViewState {
     /// Create a Markdown TextViewState.
     pub fn markdown(text: &str, cx: &mut Context<Self>) -> Self {
-        Self::new(TextViewFormat::Markdown, text, cx)
+        Self::new(TextViewFormat::Markdown, text, Arc::default(), cx)
+    }
+
+    /// Parse the initial document once with its extension registry already installed.
+    pub fn markdown_with_extensions(
+        text: &str,
+        extensions: MarkdownExtensions,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new(TextViewFormat::Markdown, text, Arc::new(extensions), cx)
     }
 
     /// Create a HTML TextViewState.
     pub fn html(text: &str, cx: &mut Context<Self>) -> Self {
-        Self::new(TextViewFormat::Html, text, cx)
+        Self::new(TextViewFormat::Html, text, Arc::default(), cx)
     }
 
     /// Create a new TextViewState.
-    fn new(format: TextViewFormat, text: &str, cx: &mut Context<Self>) -> Self {
+    fn new(
+        format: TextViewFormat,
+        text: &str,
+        markdown_extensions: Arc<MarkdownExtensions>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus_handle = cx.focus_handle();
         let entity_id = cx.entity_id();
 
@@ -146,7 +167,8 @@ impl TextViewState {
             list_state: ListState::new(0, gpui::ListAlignment::Top, px(1000.)).measure_all(),
             text_view_style: TextViewStyle::default(),
             code_block_actions: None,
-            markdown_extensions: Arc::default(),
+            interactions: Default::default(),
+            markdown_extensions,
             is_selecting: false,
             auto_scroll: AutoScroll::default(),
             parsed_content: Default::default(),
@@ -163,8 +185,41 @@ impl TextViewState {
     }
 
     /// Get the text content.
-    pub(crate) fn source(&self) -> SharedString {
+    pub fn source(&self) -> SharedString {
         self.parsed_content.document.source.clone()
+    }
+
+    /// Last laid-out heading bounds in window coordinates. An outer scroll
+    /// container can use these without giving up ownership of its scroll state.
+    pub fn anchor_bounds(&self, anchor: &str) -> Option<Bounds<Pixels>> {
+        self.parsed_content
+            .node_cx
+            .heading_bounds
+            .lock()
+            .ok()?
+            .get(anchor)
+            .copied()
+    }
+
+    /// The block at the viewport top and the offset within it, for restoring
+    /// a reading position after a font or container-width change.
+    pub fn reading_position(&self, top: Pixels) -> Option<(usize, Pixels)> {
+        let blocks = self.parsed_content.node_cx.block_bounds.lock().ok()?;
+        let (index, bounds) = blocks
+            .iter()
+            .find(|(_, bounds)| bounds.bottom() > top)
+            .or_else(|| blocks.iter().next_back())?;
+        Some((*index, top - bounds.top()))
+    }
+
+    pub fn block_bounds(&self, index: usize) -> Option<Bounds<Pixels>> {
+        self.parsed_content
+            .node_cx
+            .block_bounds
+            .lock()
+            .ok()?
+            .get(&index)
+            .copied()
     }
 
     /// Set whether the text is selectable, default false.
@@ -250,7 +305,7 @@ impl TextViewState {
             revision: self.revision,
             append,
             pending_text: text.to_string(),
-            highlight_theme: cx.theme().highlight_theme.clone(),
+            highlight_theme: self.text_view_style.highlight_theme.clone(),
             markdown_extensions: self.markdown_extensions.clone(),
         };
 
@@ -443,6 +498,7 @@ impl Render for TextViewState {
         let mut node_cx = self.parsed_content.node_cx.clone();
 
         node_cx.code_block_actions = self.code_block_actions.clone();
+        node_cx.interactions = self.interactions.clone();
         node_cx.markdown_extensions = self.markdown_extensions.clone();
         node_cx.style = self.text_view_style.clone();
 
@@ -591,6 +647,11 @@ fn parse_content(
 ) -> Result<ParsedContent, SharedString> {
     let mut node_cx = NodeContext {
         markdown_extensions: options.markdown_extensions.clone(),
+        link_refs: if options.append {
+            content.node_cx.link_refs.clone()
+        } else {
+            Default::default()
+        },
         ..NodeContext::default()
     };
 
@@ -622,6 +683,8 @@ fn parse_content(
         content.document = new_document;
     }
 
+    content.document.assign_anchors();
+    content.node_cx = node_cx;
     Ok(content)
 }
 

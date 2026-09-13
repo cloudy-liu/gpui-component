@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use gpui::{Pixels, Rems, StyleRefinement, px, rems};
+use gpui::{Hsla, Pixels, Rems, StyleRefinement, px, rems};
 
 use crate::highlighter::HighlightTheme;
 
@@ -28,6 +28,28 @@ pub struct TextViewStyle {
     pub table: StyleRefinement,
     /// Style refinement applied to each table cell.
     pub table_cell: StyleRefinement,
+    /// Per-level heading refinements, applied after the default heading style.
+    pub headings: [StyleRefinement; 6],
+    pub blockquote: StyleRefinement,
+    pub nested_blockquote: StyleRefinement,
+    pub alert: StyleRefinement,
+    pub table_header: StyleRefinement,
+    pub list_item: StyleRefinement,
+    pub link_color: Option<Hsla>,
+    pub link_hover_color: Option<Hsla>,
+    pub inline_code_color: Option<Hsla>,
+    pub inline_code_background: Option<Hsla>,
+    pub inline_code_font: Option<gpui::SharedString>,
+    pub inline_code_fallbacks: Option<gpui::FontFallbacks>,
+    pub selection_color: Option<Hsla>,
+    pub border_color: Option<Hsla>,
+    pub task_color: Option<Hsla>,
+    pub task_foreground: Option<Hsla>,
+    pub quote_link_color: Option<Hsla>,
+    pub quote_code_color: Option<Hsla>,
+    pub quote_code_background: Option<Hsla>,
+    pub table_code_background: Option<Hsla>,
+    pub table_hover_background: Option<Hsla>,
     pub is_dark: bool,
 }
 
@@ -36,6 +58,36 @@ impl PartialEq for TextViewStyle {
         self.paragraph_gap == other.paragraph_gap
             && self.heading_base_font_size == other.heading_base_font_size
             && self.highlight_theme == other.highlight_theme
+            && match (&self.heading_font_size, &other.heading_font_size) {
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            }
+            && self.code_block == other.code_block
+            && self.table == other.table
+            && self.table_cell == other.table_cell
+            && self.headings == other.headings
+            && self.blockquote == other.blockquote
+            && self.nested_blockquote == other.nested_blockquote
+            && self.alert == other.alert
+            && self.table_header == other.table_header
+            && self.list_item == other.list_item
+            && self.link_color == other.link_color
+            && self.link_hover_color == other.link_hover_color
+            && self.inline_code_color == other.inline_code_color
+            && self.inline_code_background == other.inline_code_background
+            && self.inline_code_font == other.inline_code_font
+            && self.inline_code_fallbacks == other.inline_code_fallbacks
+            && self.selection_color == other.selection_color
+            && self.border_color == other.border_color
+            && self.task_color == other.task_color
+            && self.task_foreground == other.task_foreground
+            && self.quote_link_color == other.quote_link_color
+            && self.quote_code_color == other.quote_code_color
+            && self.quote_code_background == other.quote_code_background
+            && self.table_code_background == other.table_code_background
+            && self.table_hover_background == other.table_hover_background
+            && self.is_dark == other.is_dark
     }
 }
 
@@ -49,6 +101,27 @@ impl Default for TextViewStyle {
             code_block: StyleRefinement::default(),
             table: StyleRefinement::default(),
             table_cell: StyleRefinement::default(),
+            headings: std::array::from_fn(|_| StyleRefinement::default()),
+            blockquote: StyleRefinement::default(),
+            nested_blockquote: StyleRefinement::default(),
+            alert: StyleRefinement::default(),
+            table_header: StyleRefinement::default(),
+            list_item: StyleRefinement::default(),
+            link_color: None,
+            link_hover_color: None,
+            inline_code_color: None,
+            inline_code_background: None,
+            inline_code_font: None,
+            inline_code_fallbacks: None,
+            selection_color: None,
+            border_color: None,
+            task_color: None,
+            task_foreground: None,
+            quote_link_color: None,
+            quote_code_color: None,
+            quote_code_background: None,
+            table_code_background: None,
+            table_hover_background: None,
             is_dark: false,
         }
     }

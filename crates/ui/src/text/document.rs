@@ -3,6 +3,7 @@ use gpui::{
     Styled as _, Window, div,
 };
 
+use crate::ElementExt as _;
 use crate::text::node::{BlockNode, NodeContext};
 
 /// The parsed document AST.
@@ -30,6 +31,49 @@ impl NodeRenderOptions {
 }
 
 impl ParsedDocument {
+    /// GitHub-style stable heading slugs, including duplicate-title suffixes.
+    /// Called only when content changes, never for a style update.
+    pub(super) fn assign_anchors(&mut self) {
+        fn visit(nodes: &mut [BlockNode], used: &mut std::collections::HashSet<String>) {
+            for node in nodes {
+                match node {
+                    BlockNode::Heading {
+                        children, anchor, ..
+                    } => {
+                        let base: String = children
+                            .text()
+                            .trim()
+                            .to_lowercase()
+                            .chars()
+                            .filter_map(|c| {
+                                if c.is_whitespace() {
+                                    Some('-')
+                                } else if c.is_alphanumeric() || c == '-' || c == '_' {
+                                    Some(c)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        let mut id = base.clone();
+                        let mut suffix = 1;
+                        while !used.insert(id.clone()) {
+                            id = format!("{base}-{suffix}");
+                            suffix += 1;
+                        }
+                        *anchor = id.into();
+                    }
+                    BlockNode::Root { children, .. }
+                    | BlockNode::Blockquote { children, .. }
+                    | BlockNode::List { children, .. }
+                    | BlockNode::ListItem { children, .. } => visit(children, used),
+                    _ => {}
+                }
+            }
+        }
+        visit(&mut self.blocks, &mut Default::default());
+    }
+
     pub(super) fn text(&self) -> String {
         let mut text = String::new();
         for block in self.blocks.iter() {
@@ -83,16 +127,24 @@ impl ParsedDocument {
                 .id("document")
                 .children(self.blocks.iter().enumerate().map(move |(ix, node)| {
                     let is_last = ix + 1 == blocks_len;
-                    node.render_block(
-                        NodeRenderOptions {
-                            ix,
-                            is_last,
-                            ..Default::default()
-                        },
-                        node_cx,
-                        window,
-                        cx,
-                    )
+                    let block_bounds = node_cx.block_bounds.clone();
+                    div()
+                        .relative()
+                        .child(node.render_block(
+                            NodeRenderOptions {
+                                ix,
+                                is_last,
+                                ..Default::default()
+                            },
+                            node_cx,
+                            window,
+                            cx,
+                        ))
+                        .on_prepaint(move |bounds, _, _| {
+                            if let Ok(mut blocks) = block_bounds.lock() {
+                                blocks.insert(ix, bounds);
+                            }
+                        })
                 }));
         };
 
@@ -113,8 +165,10 @@ impl ParsedDocument {
                 let blocks = blocks.clone();
                 move |ix, window, cx| {
                     let is_last = ix + 1 == blocks.len();
-                    blocks[ix]
-                        .render_block(
+                    let block_bounds = node_cx.block_bounds.clone();
+                    div()
+                        .relative()
+                        .child(blocks[ix].render_block(
                             NodeRenderOptions {
                                 ix,
                                 is_last,
@@ -123,7 +177,12 @@ impl ParsedDocument {
                             &node_cx,
                             window,
                             cx,
-                        )
+                        ))
+                        .on_prepaint(move |bounds, _, _| {
+                            if let Ok(mut blocks) = block_bounds.lock() {
+                                blocks.insert(ix, bounds);
+                            }
+                        })
                         .into_any_element()
                 }
             })

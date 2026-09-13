@@ -7,11 +7,9 @@ use gpui::{
     AbsoluteLength, AnyElement, App, AvailableSpace, Bounds, DefiniteLength, Element, ElementId,
     GlobalElementId, HighlightStyle, InspectorElementId, InteractiveElement as _, IntoElement,
     LayoutId, LineFragment as WrapLineFragment, ObjectFit, Pixels, ShapedLine, SharedString,
-    SharedUri, Size, StatefulInteractiveElement as _, Styled, StyledImage as _, TextRun, TextStyle,
-    WhiteSpace, Window, img, point, prelude::FluentBuilder as _, px, relative, size,
+    SharedUri, Size, Styled, StyledImage as _, TextRun, TextStyle, WhiteSpace, Window, img, point,
+    prelude::FluentBuilder as _, px, relative, size,
 };
-
-use crate::{WindowExt as _, tooltip::Tooltip};
 
 use super::{
     inline::{Inline, InlineState},
@@ -23,6 +21,8 @@ const IMAGE_LEN: usize = 1;
 pub(super) struct InlineFlow {
     id: ElementId,
     items: Vec<InlineFlowItem>,
+    interactions: super::interaction::TextViewInteractions,
+    reading_style: super::TextViewStyle,
 }
 
 pub(super) enum InlineFlowItem {
@@ -31,6 +31,7 @@ pub(super) enum InlineFlowItem {
         text: SharedString,
         links: Vec<(Range<usize>, LinkMark)>,
         highlights: Vec<(Range<usize>, HighlightStyle)>,
+        code_ranges: Vec<Range<usize>>,
     },
     Image {
         url: SharedUri,
@@ -75,6 +76,7 @@ enum MeasureItem {
         text: SharedString,
         links: Vec<(Range<usize>, LinkMark)>,
         highlights: Vec<(Range<usize>, HighlightStyle)>,
+        code_ranges: Vec<Range<usize>>,
     },
     Image {
         url: SharedUri,
@@ -104,33 +106,22 @@ impl InlineFlow {
         Self {
             id: id.into(),
             items,
+            interactions: Default::default(),
+            reading_style: Default::default(),
         }
     }
 
-    fn image_element(
-        ix: usize,
-        url: &SharedUri,
-        link: &Option<LinkMark>,
-        title: &str,
-        size: Size<Pixels>,
-    ) -> AnyElement {
-        img(url.clone())
-            .id(ix)
-            .object_fit(ObjectFit::Contain)
-            .max_w(relative(1.))
-            .w(size.width)
-            .h(size.height)
-            .when_some(link.clone(), |this, link| {
-                let title = title.to_string();
-                this.cursor_pointer()
-                    .tooltip(move |window, cx| Tooltip::new(title.clone()).build(window, cx))
-                    .on_click(move |_, window, cx| {
-                        window.end_text_selection(cx);
-                        cx.stop_propagation();
-                        cx.open_url(&link.url);
-                    })
-            })
-            .into_any_element()
+    pub(super) fn interactions(
+        mut self,
+        interactions: super::interaction::TextViewInteractions,
+    ) -> Self {
+        self.interactions = interactions;
+        self
+    }
+
+    pub(super) fn reading_style(mut self, style: super::TextViewStyle) -> Self {
+        self.reading_style = style;
+        self
     }
 }
 
@@ -175,6 +166,7 @@ impl Element for InlineFlow {
                     *height,
                     line_height,
                     rem_size,
+                    &self.interactions,
                     window,
                     cx,
                 )),
@@ -183,6 +175,7 @@ impl Element for InlineFlow {
             .collect::<Vec<_>>();
         let layout_state = InlineFlowLayoutState::default();
         let layout_ref = layout_state.layout.clone();
+        let reading_style = self.reading_style.clone();
 
         let layout_id = window.request_measured_layout(Default::default(), {
             move |known_dimensions, available_space, window, _cx| {
@@ -200,6 +193,7 @@ impl Element for InlineFlow {
                     &image_sizes,
                     &text_style,
                     wrap_width,
+                    &reading_style,
                     window,
                 );
                 let size = layout.size;
@@ -254,8 +248,15 @@ impl Element for InlineFlow {
                         state.set_text(text);
                     }
 
-                    let mut element =
-                        Inline::new(elements.len(), state, links, highlights).into_any_element();
+                    let code = match &self.items[item_ix] {
+                        InlineFlowItem::Text { code_ranges, .. } => {
+                            clip_code_ranges(code_ranges, source_range.start, source_range.end)
+                        }
+                        _ => Vec::new(),
+                    };
+                    let mut element = Inline::new(elements.len(), state, links, highlights)
+                        .reading_style(&self.reading_style, code)
+                        .into_any_element();
                     element.prepaint_as_root(
                         bounds.origin + origin,
                         size(
@@ -278,12 +279,15 @@ impl Element for InlineFlow {
                     else {
                         continue;
                     };
-                    let mut element = Self::image_element(
+                    let mut element = self.interactions.image(
                         elements.len(),
                         url,
                         link,
                         title.as_str(),
-                        fragment_size,
+                        Some(fragment_size.width.into()),
+                        Some(fragment_size.height.into()),
+                        window,
+                        cx,
                     );
                     element.prepaint_as_root(
                         bounds.origin + origin,
@@ -326,11 +330,13 @@ impl From<&InlineFlowItem> for MeasureItem {
                 text,
                 links,
                 highlights,
+                code_ranges,
                 ..
             } => MeasureItem::Text {
                 text: text.clone(),
                 links: links.clone(),
                 highlights: highlights.clone(),
+                code_ranges: code_ranges.clone(),
             },
             InlineFlowItem::Image {
                 url, width, height, ..
@@ -357,6 +363,7 @@ fn layout_flow(
     image_sizes: &[Option<Size<Pixels>>],
     text_style: &TextStyle,
     wrap_width: Option<Pixels>,
+    reading_style: &super::TextViewStyle,
     window: &mut Window,
 ) -> InlineFlowLayout {
     let line_height = window.line_height();
@@ -393,6 +400,7 @@ fn layout_flow(
                     text,
                     links,
                     highlights,
+                    code_ranges,
                 } => {
                     let local_start = line_range.start.max(item_start) - item_start;
                     let local_end = line_range.end.min(item_end) - item_start;
@@ -405,7 +413,15 @@ fn layout_flow(
                         let links = slice_ranges(links, local_start, local_end, |range, link| {
                             (range, link.clone())
                         });
-                        let runs = runs_for_highlights(&subtext, text_style, highlights.clone());
+                        let code = clip_code_ranges(code_ranges, local_start, local_end);
+                        let runs = super::inline::styled_runs(
+                            &subtext,
+                            text_style,
+                            &highlights,
+                            &code,
+                            reading_style.inline_code_font.as_ref(),
+                            reading_style.inline_code_fallbacks.as_ref(),
+                        );
                         let shaped_line = shape_line(subtext.clone(), font_size, &runs, window);
                         let width = shaped_line.width();
                         line_width += width;
@@ -440,7 +456,14 @@ fn layout_flow(
             item_start = item_end;
         }
 
-        let mut x = Pixels::ZERO;
+        let remaining = wrap_width
+            .map(|width| (width - line_width).max(Pixels::ZERO))
+            .unwrap_or_default();
+        let mut x = match text_style.text_align {
+            gpui::TextAlign::Center => remaining / 2.,
+            gpui::TextAlign::Right => remaining,
+            _ => Pixels::ZERO,
+        };
         for fragment in line_fragments {
             let origin = point(x, y + (actual_line_height - fragment.size.height) / 2.);
             let positioned = match fragment.kind {
@@ -473,7 +496,14 @@ fn layout_flow(
 
     InlineFlowLayout {
         fragments,
-        size: size(max_width, y),
+        size: size(
+            if text_style.text_align != gpui::TextAlign::Left {
+                wrap_width.unwrap_or(max_width)
+            } else {
+                max_width
+            },
+            y,
+        ),
     }
 }
 
@@ -484,47 +514,65 @@ fn line_ranges(
     wrap_width: Option<Pixels>,
     window: &mut Window,
 ) -> Vec<Range<usize>> {
-    let total_len = items.iter().map(MeasureItem::len).sum::<usize>();
-    let Some(wrap_width) = wrap_width else {
-        return std::iter::once(0..total_len).collect();
-    };
     let rem_size = window.rem_size();
-
-    let wrap_fragments = items
-        .iter()
-        .enumerate()
-        .map(|(ix, item)| match item {
-            MeasureItem::Text { text, .. } => WrapLineFragment::text(text),
-            MeasureItem::Image { .. } => WrapLineFragment::element(
-                image_sizes[ix]
-                    .expect("image size should be measured before wrapping")
-                    .width,
-                IMAGE_LEN,
-            ),
-        })
-        .collect::<Vec<_>>();
     let font_size = text_style.font_size.to_pixels(rem_size);
     let mut wrapper = window
         .text_system()
         .line_wrapper(text_style.font(), font_size);
-    let boundaries = wrapper
-        .wrap_line(&wrap_fragments, wrap_width)
-        .map(|boundary| boundary.ix.min(total_len))
-        .collect::<Vec<_>>();
-    let mut ranges = Vec::with_capacity(boundaries.len() + 1);
-    let mut start = 0;
+    let mut ranges = Vec::new();
+    let mut append_line =
+        |fragments: &[WrapLineFragment<'_>], line_start: usize, line_len: usize| {
+            let line_end = line_start + line_len;
+            let Some(width) = wrap_width.filter(|_| line_len > 0) else {
+                ranges.push(line_start..line_end);
+                return;
+            };
+            let mut start = line_start;
+            for boundary in wrapper.wrap_line(fragments, width) {
+                let end = line_start + boundary.ix.min(line_len);
+                if start < end {
+                    ranges.push(start..end);
+                }
+                start = end;
+            }
+            if start < line_end {
+                ranges.push(start..line_end);
+            }
+        };
 
-    for end in boundaries {
-        if start < end {
-            ranges.push(start..end);
+    // A hard break starts a fresh wrapping line even when an image shares the
+    // paragraph. Keep offsets in source bytes; never send newlines to shaping.
+    let mut fragments = Vec::new();
+    let (mut start, mut len) = (0, 0);
+    for (ix, item) in items.iter().enumerate() {
+        match item {
+            MeasureItem::Text { text, .. } => {
+                for part in text.split_inclusive('\n') {
+                    let content = part.strip_suffix('\n').unwrap_or(part);
+                    if !content.is_empty() {
+                        fragments.push(WrapLineFragment::text(content));
+                    }
+                    len += content.len();
+                    if part.ends_with('\n') {
+                        append_line(&fragments, start, len);
+                        start += len + 1;
+                        len = 0;
+                        fragments.clear();
+                    }
+                }
+            }
+            MeasureItem::Image { .. } => {
+                fragments.push(WrapLineFragment::element(
+                    image_sizes[ix]
+                        .expect("image size should be measured before wrapping")
+                        .width,
+                    IMAGE_LEN,
+                ));
+                len += IMAGE_LEN;
+            }
         }
-        start = end;
     }
-
-    if start < total_len {
-        ranges.push(start..total_len);
-    }
-
+    append_line(&fragments, start, len);
     ranges
 }
 
@@ -536,13 +584,14 @@ fn measure_image_size(
     height: Option<DefiniteLength>,
     line_height: Pixels,
     rem_size: Pixels,
+    interactions: &super::interaction::TextViewInteractions,
     window: &mut Window,
     cx: &mut App,
 ) -> Size<Pixels> {
     let intrinsic_size = if width.is_some() && height.is_some() {
         None
     } else {
-        intrinsic_image_size(ix, url, width, height, window, cx)
+        intrinsic_image_size(ix, url, width, height, interactions, window, cx)
     };
     image_size(width, height, intrinsic_size, line_height, rem_size)
 }
@@ -552,10 +601,15 @@ fn intrinsic_image_size(
     url: &SharedUri,
     width: Option<DefiniteLength>,
     height: Option<DefiniteLength>,
+    interactions: &super::interaction::TextViewInteractions,
     window: &mut Window,
     cx: &mut App,
 ) -> Option<Size<Pixels>> {
-    let mut element = img(url.clone())
+    let super::TextViewImageSource::Ready(source) = interactions.image_source(url, window, cx)
+    else {
+        return None;
+    };
+    let mut element = img(source)
         .id(ix)
         .object_fit(ObjectFit::Contain)
         .max_w(relative(1.))
@@ -623,32 +677,15 @@ fn inline_image_size_for_line(
     size((height * aspect_ratio).max(px(1.)), height.max(px(1.)))
 }
 
-fn runs_for_highlights(
-    text: &str,
-    default_style: &TextStyle,
-    highlights: Vec<(Range<usize>, HighlightStyle)>,
-) -> Vec<TextRun> {
-    let mut runs = Vec::new();
-    let mut ix = 0;
-
-    for (range, highlight) in highlights {
-        if ix < range.start {
-            runs.push(default_style.clone().to_run(range.start - ix));
-        }
-        runs.push(
-            default_style
-                .clone()
-                .highlight(highlight)
-                .to_run(range.len()),
-        );
-        ix = range.end;
-    }
-
-    if ix < text.len() {
-        runs.push(default_style.to_run(text.len() - ix));
-    }
-
-    runs
+fn clip_code_ranges(ranges: &[Range<usize>], start: usize, end: usize) -> Vec<Range<usize>> {
+    ranges
+        .iter()
+        .filter_map(|range| {
+            let lo = range.start.max(start);
+            let hi = range.end.min(end);
+            (lo < hi).then_some(lo.saturating_sub(start)..hi.saturating_sub(start))
+        })
+        .collect()
 }
 
 fn shape_line(
@@ -657,11 +694,8 @@ fn shape_line(
     runs: &[TextRun],
     window: &mut Window,
 ) -> ShapedLine {
-    // An inline text item can carry literal newlines (e.g. a multi-line HTML
-    // block whose text nodes keep their source formatting). The line breaker
-    // slices by width, not by `\n`, so a stray hard break would reach gpui's
-    // shaper, which panics on newlines. Replace instead of stripping: the
-    // byte length stays the same, so run/highlight offsets remain valid.
+    // Hard breaks were split before wrapping. Normalize source CR whitespace
+    // without changing byte offsets used by highlights and selection.
     let text = if text.contains(['\n', '\r']) {
         SharedString::from(text.replace(['\n', '\r'], " "))
     } else {
@@ -706,5 +740,55 @@ mod tests {
         let measured = inline_image_size_for_line(None, px(20.));
 
         assert_eq!(measured, size(px(15.), px(15.)));
+    }
+
+    #[gpui::test]
+    fn image_paragraph_hard_breaks_start_new_lines(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        cx.update(|window, _| {
+            let text = |value: &str| MeasureItem::Text {
+                text: value.to_owned().into(),
+                links: Vec::new(),
+                highlights: Vec::new(),
+                code_ranges: Vec::new(),
+            };
+            let items = vec![
+                text("before\n"),
+                MeasureItem::Image {
+                    url: "icon.svg".into(),
+                    width: None,
+                    height: None,
+                },
+                text("after\n\nlast"),
+            ];
+            let image_sizes = vec![None, Some(size(px(18.), px(18.))), None];
+            let style = window.text_style();
+            for width in [None, Some(px(600.))] {
+                let layout = layout_flow(
+                    &items,
+                    &image_sizes,
+                    &style,
+                    width,
+                    &Default::default(),
+                    window,
+                );
+                let texts: Vec<_> = layout
+                    .fragments
+                    .iter()
+                    .filter_map(|fragment| match fragment {
+                        PositionedFragment::Text { text, origin, .. } => {
+                            Some((text.as_ref(), origin.y))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    texts.iter().map(|(text, _)| *text).collect::<Vec<_>>(),
+                    ["before", "after", "last"]
+                );
+                assert!(texts[1].1 > texts[0].1);
+                assert!(texts[2].1 >= texts[1].1 + window.line_height() * 2.);
+            }
+        });
     }
 }

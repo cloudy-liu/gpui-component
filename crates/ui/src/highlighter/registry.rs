@@ -207,6 +207,16 @@ pub struct ThemeStyle {
     font_weight: Option<FontWeightContent>,
 }
 
+impl From<Hsla> for ThemeStyle {
+    fn from(color: Hsla) -> Self {
+        Self {
+            color: Some(color),
+            font_style: None,
+            font_weight: None,
+        }
+    }
+}
+
 impl From<ThemeStyle> for HighlightStyle {
     fn from(style: ThemeStyle) -> Self {
         HighlightStyle {
