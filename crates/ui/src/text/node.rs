@@ -264,6 +264,32 @@ impl BlockNode {
             | BlockNode::Unknown { .. } => {}
         }
     }
+
+    pub(super) fn inline_states(&self) -> Vec<Arc<Mutex<InlineState>>> {
+        fn paragraph_states(paragraph: &Paragraph) -> Vec<Arc<Mutex<InlineState>>> {
+            std::iter::once(paragraph.state.clone())
+                .chain(paragraph.children.iter().map(|child| child.state.clone()))
+                .collect()
+        }
+        match self {
+            BlockNode::Root { children, .. }
+            | BlockNode::Blockquote { children, .. }
+            | BlockNode::List { children, .. }
+            | BlockNode::ListItem { children, .. } => {
+                children.iter().flat_map(Self::inline_states).collect()
+            }
+            BlockNode::Paragraph(paragraph) => paragraph_states(paragraph),
+            BlockNode::Heading { children, .. } => paragraph_states(children),
+            BlockNode::Table(table) => table
+                .children
+                .iter()
+                .flat_map(|row| &row.children)
+                .flat_map(|cell| paragraph_states(&cell.children))
+                .collect(),
+            BlockNode::CodeBlock(code) => vec![code.state.clone()],
+            _ => Vec::new(),
+        }
+    }
 }
 
 #[allow(unused)]
