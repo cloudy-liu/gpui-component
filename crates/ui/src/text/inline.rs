@@ -26,6 +26,10 @@ pub(super) struct Inline {
     links: Rc<Vec<(Range<usize>, LinkMark)>>,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
     styled_text: StyledText,
+    hover_color: Option<gpui::Hsla>,
+    code_ranges: Vec<Range<usize>>,
+    code_font: Option<SharedString>,
+    code_fallbacks: Option<gpui::FontFallbacks>,
 
     state: Arc<Mutex<InlineState>>,
 }
@@ -64,8 +68,24 @@ impl Inline {
             highlights,
             text: text.clone(),
             styled_text: StyledText::new(text),
+            hover_color: None,
+            code_ranges: Vec::new(),
+            code_font: None,
+            code_fallbacks: None,
             state,
         }
+    }
+
+    pub(super) fn reading_style(
+        mut self,
+        style: &super::TextViewStyle,
+        code_ranges: Vec<Range<usize>>,
+    ) -> Self {
+        self.hover_color = style.link_hover_color;
+        self.code_font = style.inline_code_font.clone();
+        self.code_fallbacks = style.inline_code_fallbacks.clone();
+        self.code_ranges = code_ranges;
+        self
     }
 
     /// Get link at given mouse position.
@@ -244,6 +264,10 @@ impl Inline {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let selection_color = GlobalState::global(cx)
+            .text_view_state()
+            .and_then(|state| state.read(cx).text_view_style.selection_color)
+            .unwrap_or(cx.theme().selection);
         let mut start = selection.start;
         let mut end = selection.end;
         if end < start {
@@ -264,7 +288,7 @@ impl Inline {
                     point(end_position.x, end_position.y + line_height),
                 ),
                 px(0.),
-                cx.theme().selection,
+                selection_color,
                 Edges::default(),
                 gpui::transparent_black(),
                 BorderStyle::default(),
@@ -276,7 +300,7 @@ impl Inline {
                     point(bounds.right(), start_position.y + line_height),
                 ),
                 px(0.),
-                cx.theme().selection,
+                selection_color,
                 Edges::default(),
                 gpui::transparent_black(),
                 BorderStyle::default(),
@@ -289,7 +313,7 @@ impl Inline {
                         point(bounds.right(), end_position.y),
                     ),
                     px(0.),
-                    cx.theme().selection,
+                    selection_color,
                     Edges::default(),
                     gpui::transparent_black(),
                     BorderStyle::default(),
@@ -302,7 +326,7 @@ impl Inline {
                     point(end_position.x, end_position.y + line_height),
                 ),
                 px(0.),
-                cx.theme().selection,
+                selection_color,
                 Edges::default(),
                 gpui::transparent_black(),
                 BorderStyle::default(),
@@ -340,18 +364,31 @@ impl Element for Inline {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let text_style = window.text_style();
 
-        let mut runs = Vec::new();
-        let mut ix = 0;
-        for (range, highlight) in self.highlights.iter() {
-            if ix < range.start {
-                runs.push(text_style.clone().to_run(range.start - ix));
+        let hovered = self.state.lock().ok().and_then(|state| state.hovered_index);
+        let mut highlights = self.highlights.clone();
+        if let (Some(color), Some(index)) = (self.hover_color, hovered) {
+            if let Some((range, _)) = self.links.iter().find(|(range, _)| range.contains(&index)) {
+                highlights = gpui::combine_highlights(
+                    highlights,
+                    vec![(
+                        range.clone(),
+                        HighlightStyle {
+                            color: Some(color),
+                            ..Default::default()
+                        },
+                    )],
+                )
+                .collect();
             }
-            runs.push(text_style.clone().highlight(*highlight).to_run(range.len()));
-            ix = range.end;
         }
-        if ix < self.text.len() {
-            runs.push(text_style.to_run(self.text.len() - ix));
-        }
+        let runs = styled_runs(
+            &self.text,
+            &text_style,
+            &highlights,
+            &self.code_ranges,
+            self.code_font.as_ref(),
+            self.code_fallbacks.as_ref(),
+        );
 
         self.styled_text = StyledText::new(self.text.clone()).with_runs(runs);
         let (layout_id, _) =
@@ -482,18 +519,27 @@ impl Element for Inline {
         window.on_mouse_event({
             let hitbox = hitbox.clone();
             let text_layout = text_layout.clone();
-            let mut hovered_index = state.hovered_index;
+            let inline_state = self.state.clone();
+            let links = self.links.clone();
             move |event: &MouseMoveEvent, phase, window, cx| {
-                if !phase.bubble() || !hitbox.is_hovered(window) {
+                if !phase.bubble() {
                     return;
                 }
-
-                let current = hovered_index;
-                let updated = text_layout.index_for_position(event.position).ok();
-                //  notify update when hovering over different links
-                if current != updated {
-                    hovered_index = updated;
-                    cx.notify(current_view);
+                let updated = hitbox
+                    .is_hovered(window)
+                    .then(|| text_layout.index_for_position(event.position).ok())
+                    .flatten()
+                    .and_then(|index| {
+                        links
+                            .iter()
+                            .find(|(range, _)| range.contains(&index))
+                            .map(|(range, _)| range.start)
+                    });
+                if let Ok(mut state) = inline_state.lock() {
+                    if state.hovered_index != updated {
+                        state.hovered_index = updated;
+                        cx.notify(current_view);
+                    }
                 }
             }
         });
@@ -507,7 +553,10 @@ impl Element for Inline {
                 let text_view_state = GlobalState::global(cx).text_view_state().cloned();
 
                 move |event: &MouseUpEvent, phase, window, cx| {
-                    if !phase.bubble() || !hitbox.is_hovered(window) {
+                    if event.button != MouseButton::Left
+                        || !phase.bubble()
+                        || !hitbox.is_hovered(window)
+                    {
                         return;
                     }
                     if text_view_state
@@ -522,12 +571,91 @@ impl Element for Inline {
                     {
                         window.end_text_selection(cx);
                         cx.stop_propagation();
-                        cx.open_url(&link.url);
+                        if let Some(state) = &text_view_state {
+                            let interactions = state.read(cx).interactions.clone();
+                            interactions.open_link(&link.url, window, cx);
+                        } else {
+                            cx.open_url(&link.url);
+                        }
                     }
                 }
             });
         }
     }
+}
+
+/// Keep measurement and painting on identical font runs, including inline code.
+pub(super) fn styled_runs(
+    text: &str,
+    base: &gpui::TextStyle,
+    highlights: &[(Range<usize>, HighlightStyle)],
+    code_ranges: &[Range<usize>],
+    code_font: Option<&SharedString>,
+    code_fallbacks: Option<&gpui::FontFallbacks>,
+) -> Vec<gpui::TextRun> {
+    // Syntax highlighting and combine_highlights return sorted, disjoint spans.
+    // Walk them once: scanning every token for every run is quadratic on code.
+    debug_assert!(
+        highlights
+            .windows(2)
+            .all(|pair| pair[0].0.end <= pair[1].0.start)
+    );
+    let mut code = code_ranges.to_vec();
+    code.sort_unstable_by_key(|range| range.start);
+    let mut merged_code: Vec<Range<usize>> = Vec::with_capacity(code.len());
+    for range in code.into_iter().filter(|range| !range.is_empty()) {
+        if let Some(previous) = merged_code
+            .last_mut()
+            .filter(|previous| range.start <= previous.end)
+        {
+            previous.end = previous.end.max(range.end);
+        } else {
+            merged_code.push(range);
+        }
+    }
+    let mut runs = Vec::with_capacity(highlights.len() * 2 + merged_code.len() * 2 + 1);
+    let (mut start, mut highlight_ix, mut code_ix) = (0, 0, 0);
+    while start < text.len() {
+        while highlights
+            .get(highlight_ix)
+            .is_some_and(|(range, _)| range.end <= start)
+        {
+            highlight_ix += 1;
+        }
+        while merged_code
+            .get(code_ix)
+            .is_some_and(|range| range.end <= start)
+        {
+            code_ix += 1;
+        }
+        let mut end = text.len();
+        let mut style = base.clone();
+        if let Some((range, highlight)) = highlights.get(highlight_ix) {
+            if range.contains(&start) {
+                style = style.highlight(*highlight);
+                end = end.min(range.end);
+            } else {
+                end = end.min(range.start);
+            }
+        }
+        if let Some(range) = merged_code.get(code_ix) {
+            if range.contains(&start) {
+                if let Some(font) = code_font {
+                    style.font_family = font.clone();
+                }
+                if let Some(fallbacks) = code_fallbacks {
+                    style.font_fallbacks = Some(fallbacks.clone());
+                }
+                end = end.min(range.end);
+            } else {
+                end = end.min(range.start);
+            }
+        }
+        debug_assert!(text.is_char_boundary(end));
+        runs.push(style.to_run(end - start));
+        start = end;
+    }
+    runs
 }
 
 fn selection_for_multi_click(

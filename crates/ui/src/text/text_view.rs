@@ -7,12 +7,12 @@ use gpui::{
     SharedString, StyleRefinement, Styled, Window, div,
 };
 
-use crate::StyledExt;
 use crate::scroll::ScrollableElement;
 use crate::text::TextViewFormat;
 use crate::text::markdown_ext::{MarkdownExtensions, MarkdownNode, MarkdownPlugin};
 use crate::text::node::CodeBlock;
 use crate::text::state::TextViewState;
+use crate::{ActiveTheme as _, StyledExt};
 use crate::{global_state::GlobalState, text::TextViewStyle};
 
 /// Type for code block actions generator function.
@@ -42,11 +42,13 @@ pub struct TextView {
     text: Option<SharedString>,
     pub(crate) state: Option<Entity<TextViewState>>,
     text_view_style: TextViewStyle,
+    custom_style: bool,
     style: StyleRefinement,
     selectable: bool,
     scrollable: bool,
     code_block_actions: Option<Arc<CodeBlockActionsFn>>,
     markdown_extensions: Arc<MarkdownExtensions>,
+    interactions: super::interaction::TextViewInteractions,
 }
 
 /// A plugin that can configure a [`TextView`].
@@ -81,11 +83,13 @@ impl TextView {
             format: None,
             text: None,
             text_view_style: TextViewStyle::default(),
+            custom_style: false,
             style: StyleRefinement::default(),
             selectable: false,
             scrollable: false,
             code_block_actions: None,
             markdown_extensions: Arc::default(),
+            interactions: Default::default(),
         }
     }
 
@@ -96,12 +100,14 @@ impl TextView {
             format: Some(TextViewFormat::Markdown),
             text: Some(markdown.into()),
             text_view_style: TextViewStyle::default(),
+            custom_style: false,
             style: StyleRefinement::default(),
             state: None,
             selectable: false,
             scrollable: false,
             code_block_actions: None,
             markdown_extensions: Arc::default(),
+            interactions: Default::default(),
         }
     }
 
@@ -112,18 +118,21 @@ impl TextView {
             format: Some(TextViewFormat::Html),
             text: Some(html.into()),
             text_view_style: TextViewStyle::default(),
+            custom_style: false,
             style: StyleRefinement::default(),
             state: None,
             selectable: false,
             scrollable: false,
             code_block_actions: None,
             markdown_extensions: Arc::default(),
+            interactions: Default::default(),
         }
     }
 
     /// Set [`TextViewStyle`].
     pub fn style(mut self, style: TextViewStyle) -> Self {
         self.text_view_style = style;
+        self.custom_style = true;
         self
     }
 
@@ -162,6 +171,27 @@ impl TextView {
         self.code_block_actions = Some(Arc::new(move |code_block, window, cx| {
             f(&code_block, window, cx).into_any_element()
         }));
+        self
+    }
+
+    /// Replace the Markdown extension registry.
+    pub fn on_link(
+        mut self,
+        handler: impl Fn(&str, &mut Window, &mut App) + Send + Sync + 'static,
+    ) -> Self {
+        self.interactions.on_link = Some(Arc::new(handler));
+        self
+    }
+
+    /// Resolve images through the document owner's resource loader.
+    pub fn image_source(
+        mut self,
+        resolver: impl Fn(&gpui::SharedUri, &mut Window, &mut App) -> super::TextViewImageSource
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        self.interactions.image_source = Some(Arc::new(resolver));
         self
     }
 
@@ -276,8 +306,13 @@ impl Element for TextView {
             state
         };
 
+        if !self.custom_style {
+            self.text_view_style.highlight_theme = cx.theme().highlight_theme.clone();
+            self.text_view_style.is_dark = cx.theme().mode.is_dark();
+        }
         state.update(cx, |state, cx| {
             state.code_block_actions = self.code_block_actions.clone();
+            state.interactions = self.interactions.clone();
             state.set_markdown_extensions(self.markdown_extensions.clone(), cx);
             state.selectable = self.selectable;
             state.scrollable = self.scrollable;
@@ -460,7 +495,7 @@ mod tests {
             "unloaded inline image fallback should stay generic and compact"
         );
     }
-  
+
     #[test]
     fn plugin_accepts_text_view_plugins_beyond_markdown() {
         let view = TextView::markdown("plugin-test", "").plugin(DummyTextViewPlugin);

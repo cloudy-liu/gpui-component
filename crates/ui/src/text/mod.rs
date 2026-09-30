@@ -2,8 +2,11 @@ mod document;
 mod format;
 mod inline;
 mod inline_flow;
+mod interaction;
 mod markdown_ext;
 mod node;
+#[cfg(test)]
+mod reading_tests;
 pub(crate) mod selection;
 mod state;
 mod style;
@@ -12,6 +15,7 @@ mod utils;
 mod window_selection;
 
 use gpui::{App, ElementId, IntoElement, RenderOnce, SharedString, Window};
+pub use interaction::TextViewImageSource;
 pub use markdown_ext::*;
 pub use state::*;
 pub use style::*;

@@ -176,12 +176,20 @@ impl PartialEq for MarkdownNode {
 #[derive(Clone, Default)]
 pub struct MarkdownExtensions {
     enable_mdx: bool,
+    pub(crate) enable_github_alerts: bool,
     block_parsers: Vec<Arc<MarkdownBlockParserFn>>,
     block_renderers: HashMap<SharedString, Arc<MarkdownBlockRenderFn>>,
     revision: u64,
 }
 
 impl MarkdownExtensions {
+    /// Render GitHub's NOTE, TIP, IMPORTANT, WARNING and CAUTION quote markers.
+    pub fn github_alerts(mut self) -> Self {
+        self.enable_github_alerts = true;
+        self.bump_revision();
+        self
+    }
+
     /// Enable MDX JSX/expression constructs.
     ///
     /// This disables raw HTML constructs because `markdown-rs` gives HTML

@@ -101,6 +101,32 @@ fn attr_value(attrs: &RefCell<Vec<html5ever::Attribute>>, name: LocalName) -> Op
     })
 }
 
+fn alignment(attrs: &RefCell<Vec<html5ever::Attribute>>) -> Option<gpui::TextAlign> {
+    let value = attr_value(attrs, local_name!("align"))
+        .or_else(|| style_attrs(attrs).remove("text-align"))?;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "left" => Some(gpui::TextAlign::Left),
+        "center" => Some(gpui::TextAlign::Center),
+        "right" => Some(gpui::TextAlign::Right),
+        _ => None,
+    }
+}
+
+pub(super) fn inherit_alignment(nodes: &mut [BlockNode], alignment: gpui::TextAlign) {
+    for node in nodes {
+        match node {
+            BlockNode::Paragraph(p) | BlockNode::Heading { children: p, .. } => {
+                p.alignment = p.alignment.or(Some(alignment));
+            }
+            BlockNode::Root { children, .. }
+            | BlockNode::Blockquote { children, .. }
+            | BlockNode::List { children, .. }
+            | BlockNode::ListItem { children, .. } => inherit_alignment(children, alignment),
+            _ => {}
+        }
+    }
+}
+
 /// Get the highlight background color for a `<mark>` element.
 ///
 /// Reads the `color` attribute first, then the `background-color` declaration
@@ -344,7 +370,9 @@ fn parse_paragraph(paragraph: &mut Paragraph, node: &Rc<Node>) {
             local_name!("u") => {
                 merge_children_with_mark(node, paragraph, Some(TextMark::default().underline()));
             }
-            local_name!("code") => {
+            local_name!("br") => paragraph.push_str("\n"),
+            local_name!("script") | local_name!("style") => {}
+            local_name!("code") | local_name!("kbd") => {
                 merge_children_with_mark(node, paragraph, Some(TextMark::default().code()));
             }
             local_name!("mark") => {
@@ -401,6 +429,78 @@ fn parse_paragraph(paragraph: &mut Paragraph, node: &Rc<Node>) {
     }
 }
 
+/// Markdown splits inline HTML into separate opening and closing AST nodes.
+/// Read only the supported inline marks; HTML attributes are never executed.
+/// A standalone container tag may surround Markdown blocks separated by blank
+/// lines. Keep that alignment until its closing tag, just as a README does.
+pub(super) fn container_boundary(source: &str) -> Option<(String, bool, Option<gpui::TextAlign>)> {
+    let tag = source.trim().strip_prefix('<')?.strip_suffix('>')?.trim();
+    if tag.contains(['<', '>']) || tag.ends_with('/') {
+        return None;
+    }
+    let close = tag.starts_with('/');
+    let name = tag
+        .trim_start_matches('/')
+        .split_ascii_whitespace()
+        .next()?
+        .to_ascii_lowercase();
+    if !["div", "p"].contains(&name.as_str()) {
+        return None;
+    }
+    if close {
+        return Some((name, true, None));
+    }
+    let dom = parse_document(RcDom::default(), ParseOpts::default()).one(source);
+    fn find(node: &Rc<Node>, tag: &str) -> Option<gpui::TextAlign> {
+        if let NodeData::Element { name, attrs, .. } = &node.data
+            && name.local.as_ref() == tag
+        {
+            return alignment(attrs);
+        }
+        node.children
+            .borrow()
+            .iter()
+            .find_map(|child| find(child, tag))
+    }
+    let align = find(&dom.document, &name);
+    Some((name, false, align))
+}
+
+pub(super) fn inline_mark(source: &str) -> Option<(String, bool, TextMark)> {
+    let tag = source.trim().strip_prefix('<')?.strip_suffix('>')?.trim();
+    let close = tag.starts_with('/');
+    let name = tag
+        .trim_start_matches('/')
+        .split_ascii_whitespace()
+        .next()?
+        .to_ascii_lowercase();
+    let mark = match name.as_str() {
+        "strong" | "b" => TextMark::default().bold(),
+        "em" | "i" => TextMark::default().italic(),
+        "code" | "kbd" => TextMark::default().code(),
+        "del" | "s" => TextMark::default().strikethrough(),
+        "a" if !close => {
+            let dom = parse_document(RcDom::default(), ParseOpts::default()).one(source);
+            fn link(node: &Rc<Node>) -> Option<LinkMark> {
+                if let NodeData::Element { name, attrs, .. } = &node.data {
+                    if name.local == local_name!("a") {
+                        return Some(LinkMark {
+                            url: attr_value(attrs, local_name!("href"))?.into(),
+                            title: attr_value(attrs, local_name!("title")).map(Into::into),
+                            ..Default::default()
+                        });
+                    }
+                }
+                node.children.borrow().iter().find_map(link)
+            }
+            TextMark::default().link(link(&dom.document)?)
+        }
+        "a" => TextMark::default(),
+        _ => return None,
+    };
+    Some((name, close, mark))
+}
+
 fn parse_node(
     node: &Rc<Node>,
     paragraph: &mut Paragraph,
@@ -445,8 +545,10 @@ fn parse_node(
                 for child in node.children.borrow().iter() {
                     parse_paragraph(&mut paragraph, child);
                 }
+                paragraph.alignment = alignment(attrs);
 
                 let heading = BlockNode::Heading {
+                    anchor: Default::default(),
                     level,
                     children: paragraph,
                     span: None,
@@ -574,6 +676,7 @@ fn parse_node(
                 let children = consume_children_nodes(node, paragraph, cx);
                 Some(BlockNode::Blockquote {
                     children,
+                    alert: None,
                     span: None,
                 })
             }
@@ -597,6 +700,9 @@ fn parse_node(
                     }
                     consume_paragraph(&mut children, paragraph);
 
+                    if let Some(alignment) = alignment(attrs) {
+                        inherit_alignment(&mut children, alignment);
+                    }
                     if children.is_empty() {
                         None
                     } else {

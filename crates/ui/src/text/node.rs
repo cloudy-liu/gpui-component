@@ -7,15 +7,14 @@ use std::{
 
 use gpui::{
     AnyElement, App, DefiniteLength, Div, ElementId, FontStyle, FontWeight, Half, HighlightStyle,
-    Hsla, InteractiveElement as _, IntoElement, Length, ObjectFit, Overflow, ParentElement,
-    ScrollHandle, SharedString, SharedUri, StatefulInteractiveElement, Styled, StyledImage as _,
-    Window, div, img, prelude::FluentBuilder as _, px, relative, rems,
+    Hsla, InteractiveElement as _, IntoElement, Length, Overflow, ParentElement, ScrollHandle,
+    SharedString, SharedUri, Styled, Window, div, prelude::FluentBuilder as _, px, relative, rems,
 };
 use markdown::mdast;
 use ropey::Rope;
 
 use crate::{
-    ActiveTheme as _, Icon, IconName, StyledExt, WindowExt as _, h_flex,
+    ActiveTheme as _, ElementExt as _, Icon, IconName, StyledExt, h_flex,
     highlighter::{HighlightTheme, LanguageRegistry, SyntaxHighlighter},
     input::{InputEdit, Point, RopeExt as _},
     scroll::horizontal_scroll_area,
@@ -25,7 +24,6 @@ use crate::{
         inline::{Inline, InlineState},
         inline_flow::{InlineFlow, InlineFlowItem},
     },
-    tooltip::Tooltip,
     v_flex,
 };
 
@@ -48,10 +46,12 @@ pub(crate) enum BlockNode {
     Heading {
         level: u8,
         children: Paragraph,
+        anchor: SharedString,
         span: Option<Span>,
     },
     Blockquote {
         children: Vec<BlockNode>,
+        alert: Option<SharedString>,
         span: Option<Span>,
     },
     List {
@@ -431,6 +431,7 @@ impl InlineNode {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Paragraph {
     pub(super) span: Option<Span>,
+    pub(super) alignment: Option<gpui::TextAlign>,
     pub(super) children: Vec<InlineNode>,
     /// The link references in this paragraph, used for reference links.
     ///
@@ -443,6 +444,7 @@ pub(crate) struct Paragraph {
 impl PartialEq for Paragraph {
     fn eq(&self, other: &Self) -> bool {
         self.span == other.span
+            && self.alignment == other.alignment
             && self.children == other.children
             && self.link_refs == other.link_refs
     }
@@ -453,6 +455,7 @@ impl Paragraph {
         Self {
             span: None,
             children: vec![InlineNode::new(&text)],
+            alignment: None,
             link_refs: HashMap::new(),
             state: Arc::new(Mutex::new(InlineState::default())),
         }
@@ -552,6 +555,7 @@ impl Paragraph {
             self,
             Paragraph {
                 span: None,
+                alignment: None,
                 children: vec![],
                 link_refs: Default::default(),
                 state: Arc::new(Mutex::new(InlineState::default())),
@@ -598,6 +602,7 @@ impl Paragraph {
     }
 
     pub(crate) fn merge(&mut self, other: Self) {
+        self.alignment = self.alignment.or(other.alignment);
         self.children.extend(other.children);
     }
 }
@@ -605,8 +610,7 @@ impl Paragraph {
 #[derive(Debug, Clone)]
 pub struct CodeBlock {
     lang: Option<SharedString>,
-    styles: Arc<Mutex<Option<Vec<(Range<usize>, HighlightStyle)>>>>,
-    highlight_theme: Arc<HighlightTheme>,
+    styles: Arc<Mutex<Option<(Arc<HighlightTheme>, Vec<(Range<usize>, HighlightStyle)>)>>>,
     state: Arc<Mutex<InlineState>>,
     pub span: Option<Span>,
 }
@@ -634,7 +638,7 @@ impl CodeBlock {
     pub(crate) fn new(
         code: SharedString,
         lang: Option<SharedString>,
-        highlight_theme: &HighlightTheme,
+        _highlight_theme: &HighlightTheme,
         span: Option<impl Into<Span>>,
     ) -> Self {
         let state = Arc::new(Mutex::new(InlineState::default()));
@@ -645,13 +649,20 @@ impl CodeBlock {
         Self {
             lang,
             styles: Arc::new(Mutex::new(None)),
-            highlight_theme: Arc::new(highlight_theme.clone()),
             state,
             span: span.map(|s| s.into()),
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn styles(&self) -> Vec<(Range<usize>, HighlightStyle)> {
+        self.styles_for(&HighlightTheme::default_light())
+    }
+
+    pub(super) fn styles_for(
+        &self,
+        theme: &Arc<HighlightTheme>,
+    ) -> Vec<(Range<usize>, HighlightStyle)> {
         let Some(lang) = &self.lang else {
             return Vec::new();
         };
@@ -660,8 +671,10 @@ impl CodeBlock {
             return Vec::new();
         };
 
-        if let Some(styles) = styles.as_ref() {
-            return styles.clone();
+        if let Some((cached_theme, cached_styles)) = styles.as_ref() {
+            if Arc::ptr_eq(cached_theme, theme) || cached_theme == theme {
+                return cached_styles.clone();
+            }
         }
 
         let code = self.code();
@@ -691,9 +704,9 @@ impl CodeBlock {
             };
 
             highlighter.update(Some(edit), &code_rope, None);
-            highlighter.styles(&(0..code.len()), &self.highlight_theme)
+            highlighter.styles(&(0..code.len()), theme)
         });
-        *styles = Some(computed_styles.clone());
+        *styles = Some((theme.clone(), computed_styles.clone()));
         computed_styles
     }
 
@@ -732,6 +745,36 @@ impl CodeBlock {
     ) -> AnyElement {
         let style = &node_cx.style;
 
+        let inline = Inline::new(
+            "code",
+            self.state.clone(),
+            vec![],
+            self.styles_for(&style.highlight_theme),
+        );
+        let mut block_style = style.code_block.clone();
+        let code = if block_style.overflow.x == Some(Overflow::Scroll) {
+            block_style.overflow.x = None;
+            let key: SharedString = format!(
+                "{}-code-scroll-{}",
+                window.current_view(),
+                self.span.unwrap_or_default().start
+            )
+            .into();
+            let scroll = window
+                .use_keyed_state(key, cx, |_, _| ScrollHandle::default())
+                .read(cx)
+                .clone();
+            horizontal_scroll_area(
+                ("code-scroll", options.ix),
+                &scroll,
+                &Default::default(),
+                div().min_w_full().whitespace_nowrap().child(inline),
+            )
+            .into_any_element()
+        } else {
+            inline.into_any_element()
+        };
+
         div()
             .when(!options.is_last, |this| this.pb(style.paragraph_gap))
             .child(
@@ -743,13 +786,8 @@ impl CodeBlock {
                     .font_family(cx.theme().mono_font_family.clone())
                     .text_size(cx.theme().mono_font_size)
                     .relative()
-                    .refine_style(&style.code_block)
-                    .child(Inline::new(
-                        "code",
-                        self.state.clone(),
-                        vec![],
-                        self.styles(),
-                    ))
+                    .refine_style(&block_style)
+                    .child(code)
                     .when_some(node_cx.code_block_actions.clone(), |this, actions| {
                         this.child(
                             div()
@@ -757,7 +795,7 @@ impl CodeBlock {
                                 .absolute()
                                 .top_2()
                                 .right_2()
-                                .bg(cx.theme().tokens.muted)
+                                .when_some(block_style.background.clone(), |this, bg| this.bg(bg))
                                 .rounded(cx.theme().radius)
                                 .child(actions(&self, window, cx)),
                         )
@@ -776,7 +814,12 @@ pub(crate) struct NodeContext {
     pub(crate) link_refs: HashMap<SharedString, LinkMark>,
     pub(crate) style: TextViewStyle,
     pub(crate) code_block_actions: Option<Arc<CodeBlockActionsFn>>,
+    pub(super) interactions: super::interaction::TextViewInteractions,
+    pub(crate) quote_depth: usize,
     pub(crate) markdown_extensions: Arc<MarkdownExtensions>,
+    pub(super) heading_bounds: Arc<Mutex<HashMap<SharedString, gpui::Bounds<gpui::Pixels>>>>,
+    pub(super) block_bounds:
+        Arc<Mutex<std::collections::BTreeMap<usize, gpui::Bounds<gpui::Pixels>>>>,
 }
 
 impl NodeContext {
@@ -794,16 +837,27 @@ impl PartialEq for NodeContext {
 }
 
 impl Paragraph {
-    fn render(&self, node_cx: &NodeContext, _window: &mut Window, cx: &mut App) -> AnyElement {
+    fn render(&self, node_cx: &NodeContext, window: &mut Window, cx: &mut App) -> AnyElement {
         let span = self.span;
         let children = &self.children;
 
         if self.should_render_inline_flow() {
-            return InlineFlow::new(
+            let flow = InlineFlow::new(
                 span.unwrap_or_default(),
                 self.inline_flow_items(node_cx, cx),
             )
-            .into_any_element();
+            .interactions(node_cx.interactions.clone())
+            .reading_style(node_cx.style.clone());
+            return div()
+                .w_full()
+                .when(self.alignment == Some(gpui::TextAlign::Center), |el| {
+                    el.text_center()
+                })
+                .when(self.alignment == Some(gpui::TextAlign::Right), |el| {
+                    el.text_right()
+                })
+                .child(flow)
+                .into_any_element();
         }
 
         let mut child_nodes: Vec<AnyElement> = vec![];
@@ -811,6 +865,7 @@ impl Paragraph {
         let mut text = String::new();
         let mut highlights: Vec<(Range<usize>, HighlightStyle)> = vec![];
         let mut links: Vec<(Range<usize>, LinkMark)> = vec![];
+        let mut code_ranges = Vec::new();
         let mut offset = 0;
 
         let mut ix = 0;
@@ -830,33 +885,25 @@ impl Paragraph {
                             links.clone(),
                             highlights.clone(),
                         )
+                        .reading_style(&node_cx.style, code_ranges.clone())
                         .into_any_element(),
                     );
                 }
-                child_nodes.push(
-                    img(image.url.clone())
-                        .id(ix)
-                        .object_fit(ObjectFit::Contain)
-                        .max_w(relative(1.))
-                        .when_some(image.width, |this, width| this.w(width))
-                        .when_some(image.link.clone(), |this, link| {
-                            let title = image.title();
-                            this.cursor_pointer()
-                                .tooltip(move |window, cx| {
-                                    Tooltip::new(title.clone()).build(window, cx)
-                                })
-                                .on_click(move |_, window, cx| {
-                                    window.end_text_selection(cx);
-                                    cx.stop_propagation();
-                                    cx.open_url(&link.url);
-                                })
-                        })
-                        .into_any_element(),
-                );
+                child_nodes.push(node_cx.interactions.image(
+                    ix,
+                    &image.url,
+                    &image.link,
+                    &image.title(),
+                    image.width,
+                    image.height,
+                    window,
+                    cx,
+                ));
 
                 text.clear();
                 links.clear();
                 highlights.clear();
+                code_ranges.clear();
                 offset = 0;
             } else {
                 let mut node_highlights = vec![];
@@ -883,14 +930,21 @@ impl Paragraph {
                         });
                     }
                     if style.code {
-                        highlight.background_color = Some(cx.theme().accent);
+                        code_ranges.push(inner_range.clone());
+                        highlight.background_color = Some(
+                            node_cx
+                                .style
+                                .inline_code_background
+                                .unwrap_or(cx.theme().accent),
+                        );
+                        highlight.color = node_cx.style.inline_code_color;
                     }
                     if let Some(color) = style.highlight {
                         highlight.background_color = Some(color);
                     }
 
                     if let Some(mut link_mark) = style.link.clone() {
-                        highlight.color = Some(cx.theme().link);
+                        highlight.color = Some(node_cx.style.link_color.unwrap_or(cx.theme().link));
                         highlight.underline = Some(gpui::UnderlineStyle {
                             thickness: gpui::px(1.),
                             ..Default::default()
@@ -920,12 +974,27 @@ impl Paragraph {
             if let Ok(mut state) = self.state.lock() {
                 state.set_text(text.into());
             }
-            child_nodes
-                .push(Inline::new(ix, self.state.clone(), links, highlights).into_any_element());
+            child_nodes.push(
+                Inline::new(ix, self.state.clone(), links, highlights)
+                    .reading_style(&node_cx.style, code_ranges)
+                    .into_any_element(),
+            );
         }
 
         div()
             .id(span.unwrap_or_default())
+            .when(self.alignment == Some(gpui::TextAlign::Center), |el| {
+                el.text_center()
+                    .when(!children.iter().any(|c| !c.text.is_empty()), |el| {
+                        el.flex().flex_col().items_center()
+                    })
+            })
+            .when(self.alignment == Some(gpui::TextAlign::Right), |el| {
+                el.text_right()
+                    .when(!children.iter().any(|c| !c.text.is_empty()), |el| {
+                        el.flex().flex_col().items_end()
+                    })
+            })
             .children(child_nodes)
             .into_any_element()
     }
@@ -933,7 +1002,7 @@ impl Paragraph {
     fn should_render_inline_flow(&self) -> bool {
         let has_image = self.children.iter().any(|child| child.image.is_some());
         let has_text = self.children.iter().any(|child| !child.text.is_empty());
-        has_image && has_text
+        has_image && (has_text || self.children.iter().filter(|c| c.image.is_some()).count() > 1)
     }
 
     fn inline_flow_items(&self, node_cx: &NodeContext, cx: &mut App) -> Vec<InlineFlowItem> {
@@ -941,6 +1010,7 @@ impl Paragraph {
         let mut text = String::new();
         let mut highlights: Vec<(Range<usize>, HighlightStyle)> = vec![];
         let mut links: Vec<(Range<usize>, LinkMark)> = vec![];
+        let mut code_ranges = Vec::new();
         let mut offset = 0;
 
         for inline_node in &self.children {
@@ -957,6 +1027,7 @@ impl Paragraph {
                         text: text.clone().into(),
                         links: links.clone(),
                         highlights: highlights.clone(),
+                        code_ranges: code_ranges.clone(),
                     });
                 }
 
@@ -971,6 +1042,7 @@ impl Paragraph {
                 text.clear();
                 links.clear();
                 highlights.clear();
+                code_ranges.clear();
                 offset = 0;
             } else {
                 let mut node_highlights = vec![];
@@ -997,14 +1069,21 @@ impl Paragraph {
                         });
                     }
                     if style.code {
-                        highlight.background_color = Some(cx.theme().accent);
+                        code_ranges.push(inner_range.clone());
+                        highlight.background_color = Some(
+                            node_cx
+                                .style
+                                .inline_code_background
+                                .unwrap_or(cx.theme().accent),
+                        );
+                        highlight.color = node_cx.style.inline_code_color;
                     }
                     if let Some(color) = style.highlight {
                         highlight.background_color = Some(color);
                     }
 
                     if let Some(mut link_mark) = style.link.clone() {
-                        highlight.color = Some(cx.theme().link);
+                        highlight.color = Some(node_cx.style.link_color.unwrap_or(cx.theme().link));
                         highlight.underline = Some(gpui::UnderlineStyle {
                             thickness: gpui::px(1.),
                             ..Default::default()
@@ -1036,6 +1115,7 @@ impl Paragraph {
                 text: text.into(),
                 links,
                 highlights,
+                code_ranges,
             });
         }
 
@@ -1249,6 +1329,7 @@ impl BlockNode {
                 .id(("li", options.ix))
                 .w_full()
                 .min_w_0()
+                .refine_style(&node_cx.style.list_item)
                 .when(*spread, |this| this.child(div()))
                 .children({
                     let mut items: Vec<Div> = Vec::with_capacity(children.len());
@@ -1316,14 +1397,27 @@ impl BlockNode {
                                                     .justify_center()
                                                     .rounded(cx.theme().radius.half())
                                                     .border_1()
-                                                    .border_color(cx.theme().primary)
-                                                    .text_color(cx.theme().primary_foreground)
+                                                    .border_color(
+                                                        node_cx
+                                                            .style
+                                                            .task_color
+                                                            .unwrap_or(cx.theme().primary),
+                                                    )
+                                                    .text_color(
+                                                        node_cx.style.task_foreground.unwrap_or(
+                                                            cx.theme().primary_foreground,
+                                                        ),
+                                                    )
                                                     .when(checked, |this| {
-                                                        this.bg(cx.theme().tokens.primary).child(
-                                                            Icon::new(IconName::Check)
-                                                                .size_2()
-                                                                .text_xs(),
-                                                        )
+                                                        this.bg(node_cx
+                                                            .style
+                                                            .task_color
+                                                            .unwrap_or(cx.theme().primary))
+                                                            .child(
+                                                                Icon::new(IconName::Check)
+                                                                    .size_2()
+                                                                    .text_xs(),
+                                                            )
                                                     }),
                                             )
                                         })
@@ -1366,6 +1460,13 @@ impl BlockNode {
         cx: &mut App,
     ) -> impl IntoElement {
         const DEFAULT_LENGTH: usize = 5;
+
+        let mut table_cx = node_cx.clone();
+        table_cx.style.inline_code_background = node_cx
+            .style
+            .table_code_background
+            .or(node_cx.style.inline_code_background);
+        let node_cx = &table_cx;
 
         let table = match item {
             BlockNode::Table(table) => table,
@@ -1410,7 +1511,6 @@ impl BlockNode {
     ) -> AnyElement {
         const CELL_PAD_PX: f32 = 16.0; // px_2 horizontal padding
         const CELL_MIN_PX: f32 = 48.0;
-        const CELL_MAX_PX: f32 = 480.0;
 
         // Measure the widest text per column.
         let text_style = window.text_style();
@@ -1434,7 +1534,7 @@ impl BlockNode {
                         .width;
                     w = w.max(f32::from(line_w));
                 }
-                *slot = slot.max((w + CELL_PAD_PX).min(CELL_MAX_PX));
+                *slot = slot.max(w + CELL_PAD_PX);
             }
         }
         let total_w: f32 = col_w.iter().sum();
@@ -1484,18 +1584,24 @@ impl BlockNode {
                         .px_2()
                         .py_1()
                         .when(!is_last_col, |this| {
-                            this.border_r_1().border_color(cx.theme().border)
+                            this.border_r_1().border_color(
+                                node_cx.style.border_color.unwrap_or(cx.theme().border),
+                            )
                         })
                         .refine_style(&style.table_cell)
+                        .when(row_ix == 0, |this| this.refine_style(&style.table_header))
                         .child(cell.children.render(node_cx, window, cx)),
                 );
             }
             rows.push(
                 div()
-                    .id("row")
+                    .id(("row", row_ix))
+                    .when_some(style.table_hover_background, |this, color| {
+                        this.hover(move |this| this.bg(color))
+                    })
                     .w_full()
                     .when(row_ix < row_count - 1, |this| this.border_b_1())
-                    .border_color(cx.theme().border)
+                    .border_color(node_cx.style.border_color.unwrap_or(cx.theme().border))
                     .flex()
                     .flex_row()
                     .children(cells),
@@ -1523,7 +1629,7 @@ impl BlockNode {
                         .min_w_full()
                         .w(px(total_w))
                         .border_1()
-                        .border_color(cx.theme().border)
+                        .border_color(node_cx.style.border_color.unwrap_or(cx.theme().border))
                         .rounded(cx.theme().radius)
                         .children(rows),
                 ),
@@ -1568,19 +1674,25 @@ impl BlockNode {
                         .px_2()
                         .py_1()
                         .when(!is_last_col, |this| {
-                            this.border_r_1().border_color(cx.theme().border)
+                            this.border_r_1().border_color(
+                                node_cx.style.border_color.unwrap_or(cx.theme().border),
+                            )
                         })
                         .refine_style(&style.table_cell)
+                        .when(row_ix == 0, |this| this.refine_style(&style.table_header))
                         .child(cell.children.render(node_cx, window, cx)),
                 );
             }
 
             rows.push(
                 div()
-                    .id("row")
+                    .id(("row", row_ix))
+                    .when_some(style.table_hover_background, |this, color| {
+                        this.hover(move |this| this.bg(color))
+                    })
                     .w_full()
                     .when(row_ix < row_count - 1, |this| this.border_b_1())
-                    .border_color(cx.theme().border)
+                    .border_color(node_cx.style.border_color.unwrap_or(cx.theme().border))
                     .flex()
                     .flex_row()
                     .children(cells),
@@ -1595,7 +1707,7 @@ impl BlockNode {
                     .id(("table", options.ix))
                     .w_full()
                     .border_1()
-                    .border_color(cx.theme().border)
+                    .border_color(node_cx.style.border_color.unwrap_or(cx.theme().border))
                     .rounded(cx.theme().radius)
                     .overflow_hidden()
                     .children(rows)
@@ -1631,7 +1743,10 @@ impl BlockNode {
                 .child(paragraph.render(node_cx, window, cx))
                 .into_any_element(),
             BlockNode::Heading {
-                level, children, ..
+                level,
+                children,
+                anchor,
+                ..
             } => {
                 let (text_size, font_weight) = match level {
                     1 => (rems(2.), FontWeight::BOLD),
@@ -1648,35 +1763,79 @@ impl BlockNode {
                     text_size = (f)(*level, node_cx.style.heading_base_font_size);
                 }
 
+                let heading_bounds = node_cx.heading_bounds.clone();
+                let anchor = anchor.clone();
                 div()
                     .id(SharedString::from(format!("h{}-{}", level, ix)))
                     .pb(rems(0.3))
                     .whitespace_normal()
                     .text_size(text_size)
                     .font_weight(font_weight)
+                    .refine_style(
+                        &node_cx.style.headings[usize::from(level.saturating_sub(1)).min(5)],
+                    )
+                    .when(options.ix == 0, |this| this.mt_0())
                     .child(children.render(node_cx, window, cx))
+                    .on_prepaint(move |bounds, _, _| {
+                        if let Ok(mut headings) = heading_bounds.lock() {
+                            headings.insert(anchor.clone(), bounds);
+                        }
+                    })
                     .into_any_element()
             }
-            BlockNode::Blockquote { children, .. } => div()
-                .w_full()
-                .pb(mb)
-                .child(
-                    div()
-                        .id(("blockquote", ix))
-                        .w_full()
-                        .text_color(cx.theme().muted_foreground)
-                        .border_l_3()
-                        .border_color(cx.theme().secondary_active)
-                        .px_4()
-                        .children({
-                            let children_len = children.len();
-                            children.into_iter().enumerate().map(move |(index, c)| {
-                                let is_last = index == children_len - 1;
-                                c.render_block(options.is_last(is_last), node_cx, window, cx)
+            BlockNode::Blockquote {
+                children, alert, ..
+            } => {
+                let mut quote_cx = node_cx.clone();
+                quote_cx.quote_depth += 1;
+                quote_cx.style.link_color =
+                    node_cx.style.quote_link_color.or(node_cx.style.link_color);
+                quote_cx.style.inline_code_color = node_cx
+                    .style
+                    .quote_code_color
+                    .or(node_cx.style.inline_code_color);
+                quote_cx.style.inline_code_background = node_cx
+                    .style
+                    .quote_code_background
+                    .or(node_cx.style.inline_code_background);
+                div()
+                    .w_full()
+                    .pb(mb)
+                    .child(
+                        div()
+                            .id(("blockquote", ix))
+                            .w_full()
+                            .text_color(cx.theme().muted_foreground)
+                            .border_l_3()
+                            .border_color(cx.theme().secondary_active)
+                            .px_4()
+                            .refine_style(&node_cx.style.blockquote)
+                            .when(node_cx.quote_depth > 0, |this| {
+                                this.refine_style(&node_cx.style.nested_blockquote)
                             })
-                        }),
-                )
-                .into_any_element(),
+                            .when_some(alert.clone(), |this, alert| {
+                                this.refine_style(&node_cx.style.alert).child(
+                                    h_flex()
+                                        .gap_2()
+                                        .pb_2()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child(Icon::new(match alert.as_ref() {
+                                            "WARNING" | "CAUTION" => IconName::TriangleAlert,
+                                            _ => IconName::Info,
+                                        }))
+                                        .child(alert),
+                                )
+                            })
+                            .children({
+                                let children_len = children.len();
+                                children.into_iter().enumerate().map(move |(index, c)| {
+                                    let is_last = index == children_len - 1;
+                                    c.render_block(options.is_last(is_last), &quote_cx, window, cx)
+                                })
+                            }),
+                    )
+                    .into_any_element()
+            }
             BlockNode::List {
                 children, ordered, ..
             } => v_flex()
@@ -1722,7 +1881,12 @@ impl BlockNode {
             }
             BlockNode::HorizontalRule { .. } => div()
                 .pb(mb)
-                .child(div().id("horizontal-rule").bg(cx.theme().border).h(px(2.)))
+                .child(
+                    div()
+                        .id("horizontal-rule")
+                        .bg(node_cx.style.border_color.unwrap_or(cx.theme().border))
+                        .h(px(2.)),
+                )
                 .into_any_element(),
             BlockNode::Break { .. } => div().id("break").into_any_element(),
             BlockNode::Unknown { .. } | BlockNode::Definition { .. } => div().into_any_element(),
