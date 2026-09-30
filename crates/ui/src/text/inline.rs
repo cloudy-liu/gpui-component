@@ -138,6 +138,11 @@ impl Inline {
             return (is_selectable, true, Some((0..self.text.len()).into()));
         }
 
+        if text_view_state.has_restored_selection() {
+            let selection = self.state.lock().ok().and_then(|state| state.selection);
+            return (is_selectable, true, selection);
+        }
+
         if let Some(selection) = text_view_state.multi_click_selection() {
             return (
                 is_selectable,

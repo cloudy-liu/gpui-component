@@ -1,5 +1,9 @@
 use futures::Stream as _;
-use std::{pin::Pin, sync::Arc, task::Poll};
+use std::{
+    pin::Pin,
+    sync::{Arc, Mutex},
+    task::Poll,
+};
 
 use gpui::{
     App, AppContext as _, Bounds, Context, FocusHandle, IntoElement, KeyBinding, ListState,
@@ -25,6 +29,18 @@ use crate::{
 const CONTEXT: &'static str = "TextView";
 // Keep coalescing bounded so sustained streams still render intermediate updates.
 const MAX_COALESCED_UPDATES_PER_PARSE: usize = 64;
+
+/// An owned selection snapshot for restoring the same unchanged document
+/// after a toolbar press or layout reflow. Snapshots cannot be transferred to
+/// another view or applied after the source has changed.
+#[derive(Clone)]
+pub struct TextViewSelectionSnapshot {
+    entity_id: gpui::EntityId,
+    revision: usize,
+    select_all: bool,
+    text: String,
+    ranges: Vec<(Arc<Mutex<super::inline::InlineState>>, input::Selection)>,
+}
 
 pub(crate) fn init(cx: &mut App) {
     cx.bind_keys(vec![
@@ -68,6 +84,7 @@ pub struct TextViewState {
     multi_click_selection: Option<TextViewMultiClickSelection>,
     selected_text_override: Option<String>,
     select_all: bool,
+    restored_selection: bool,
     pub(super) auto_scroll: AutoScroll,
 
     pub(super) parsed_content: ParsedContent,
@@ -158,6 +175,7 @@ impl TextViewState {
             multi_click_selection: None,
             selected_text_override: None,
             select_all: false,
+            restored_selection: false,
             selectable: false,
             scrollable: false,
             // Measure all blocks (not just visible ones) so the scrollbar
@@ -340,7 +358,7 @@ impl TextViewState {
 
     /// Save bounds and unselect if bounds changed.
     pub(super) fn update_bounds(&mut self, bounds: Bounds<Pixels>) {
-        if self.bounds.size != bounds.size {
+        if self.bounds.size != bounds.size && !self.restored_selection {
             self.reset_selection();
         }
         self.bounds = bounds;
@@ -363,6 +381,7 @@ impl TextViewState {
     }
 
     fn reset_selection(&mut self) {
+        self.restored_selection = false;
         self.multi_click_selection = None;
         self.selected_text_override = None;
         self.select_all = false;
@@ -380,6 +399,60 @@ impl TextViewState {
         cx.notify();
     }
 
+    /// Capture selection before an interaction clears it. Inline byte ranges
+    /// keep their meaning when the same document is reflowed to another width.
+    pub fn selection_snapshot(&self) -> Option<TextViewSelectionSnapshot> {
+        let text = self.selected_text();
+        if text.is_empty() {
+            return None;
+        }
+        let ranges = self
+            .parsed_content
+            .document
+            .blocks
+            .iter()
+            .flat_map(node::BlockNode::inline_states)
+            .filter_map(|state| {
+                let selection = state.lock().ok()?.selection?;
+                Some((state, selection))
+            })
+            .collect();
+        Some(TextViewSelectionSnapshot {
+            entity_id: self.entity_id,
+            revision: self.revision,
+            select_all: self.select_all,
+            text,
+            ranges,
+        })
+    }
+
+    /// Restore an unchanged view's selection. Reject snapshots from another
+    /// view or source revision; a new user selection clears the restored ranges.
+    pub fn restore_selection(
+        &mut self,
+        snapshot: TextViewSelectionSnapshot,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if snapshot.entity_id != self.entity_id || snapshot.revision != self.revision {
+            return false;
+        }
+        self.reset_selection();
+        for (state, range) in snapshot.ranges {
+            if let Ok(mut state) = state.lock() {
+                state.selection = Some(range);
+            }
+        }
+        self.select_all = snapshot.select_all;
+        self.selected_text_override = Some(snapshot.text);
+        self.restored_selection = true;
+        cx.notify();
+        true
+    }
+
+    pub(super) fn has_restored_selection(&self) -> bool {
+        self.restored_selection
+    }
+
     pub(super) fn scroll_offset(&self) -> Point<Pixels> {
         if self.scrollable {
             self.list_state.scroll_px_offset_for_scrollbar()
@@ -390,6 +463,7 @@ impl TextViewState {
 
     /// Select all rendered text in this view.
     pub fn select_all(&mut self, cx: &mut Context<Self>) {
+        self.restored_selection = false;
         self.multi_click_selection = None;
         self.selected_text_override = None;
         self.select_all = true;
@@ -406,6 +480,7 @@ impl TextViewState {
     ) {
         let scroll_offset = self.scroll_offset();
         let pos = pos - self.bounds.origin - scroll_offset;
+        self.restored_selection = false;
         self.multi_click_selection = Some(TextViewMultiClickSelection { pos, kind });
         self.selected_text_override = Some(selected_text);
         self.select_all = false;
@@ -818,6 +893,59 @@ mod tests {
         state.read_with(cx, |state, _| {
             assert!(!state.has_view_selection());
             assert_eq!(state.selected_text(), "");
+        });
+    }
+
+    #[gpui::test]
+    fn selection_snapshots_preserve_byte_ranges_across_reflow(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let view = cx.update(|cx| cx.new(|cx| TextViewState::markdown("alpha beta", cx)));
+        view.update(cx, |view, cx| {
+            // A painted inline's selection is stored in UTF-8 byte offsets.
+            let inline = view
+                .parsed_content
+                .document
+                .blocks
+                .iter()
+                .flat_map(node::BlockNode::inline_states)
+                .next()
+                .unwrap();
+            {
+                let mut inline = inline.lock().unwrap();
+                inline.text = "alpha beta".into();
+                inline.selection = Some((6..10).into());
+            }
+            let snapshot = view.selection_snapshot().unwrap();
+            view.clear_selection(cx);
+            assert!(view.restore_selection(snapshot, cx));
+            view.update_bounds(Bounds::new(
+                gpui::point(px(0.), px(0.)),
+                gpui::size(px(500.), px(300.)),
+            ));
+            assert_eq!(view.selected_text().trim(), "beta");
+            assert_eq!(inline.lock().unwrap().selection, Some((6..10).into()));
+            view.clear_selection(cx);
+            assert!(view.selected_text().is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn selection_snapshots_reject_changed_sources_and_other_views(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let first = cx.update(|cx| cx.new(|cx| TextViewState::markdown("first", cx)));
+        let second = cx.update(|cx| cx.new(|cx| TextViewState::markdown("second", cx)));
+        let snapshot = first.update(cx, |view, cx| {
+            view.select_all(cx);
+            view.selection_snapshot().unwrap()
+        });
+        second.update(cx, |view, cx| {
+            assert!(!view.restore_selection(snapshot.clone(), cx));
+            assert!(view.selected_text().is_empty());
+        });
+        first.update(cx, |view, cx| {
+            view.set_text("changed", cx);
+            assert!(!view.restore_selection(snapshot, cx));
+            assert!(view.selected_text().is_empty());
         });
     }
 
