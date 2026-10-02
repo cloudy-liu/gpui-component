@@ -41,6 +41,12 @@ pub struct TextViewStyle {
     pub inline_code_background: Option<Hsla>,
     pub inline_code_font: Option<gpui::SharedString>,
     pub inline_code_fallbacks: Option<gpui::FontFallbacks>,
+    /// Border colour of an inline code chip. When set, the chip is painted as
+    /// a rounded box (background and border) instead of a plain text-run
+    /// background.
+    pub inline_code_border: Option<Hsla>,
+    /// Colour of the bullet / number in front of a list item.
+    pub list_marker_color: Option<Hsla>,
     pub selection_color: Option<Hsla>,
     pub border_color: Option<Hsla>,
     pub task_color: Option<Hsla>,
@@ -78,6 +84,8 @@ impl PartialEq for TextViewStyle {
             && self.inline_code_background == other.inline_code_background
             && self.inline_code_font == other.inline_code_font
             && self.inline_code_fallbacks == other.inline_code_fallbacks
+            && self.inline_code_border == other.inline_code_border
+            && self.list_marker_color == other.list_marker_color
             && self.selection_color == other.selection_color
             && self.border_color == other.border_color
             && self.task_color == other.task_color
@@ -113,6 +121,8 @@ impl Default for TextViewStyle {
             inline_code_background: None,
             inline_code_font: None,
             inline_code_fallbacks: None,
+            inline_code_border: None,
+            list_marker_color: None,
             selection_color: None,
             border_color: None,
             task_color: None,

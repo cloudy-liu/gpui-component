@@ -30,6 +30,8 @@ pub(super) struct Inline {
     code_ranges: Vec<Range<usize>>,
     code_font: Option<SharedString>,
     code_fallbacks: Option<gpui::FontFallbacks>,
+    code_background: Option<gpui::Hsla>,
+    code_border: Option<gpui::Hsla>,
 
     state: Arc<Mutex<InlineState>>,
 }
@@ -72,6 +74,8 @@ impl Inline {
             code_ranges: Vec::new(),
             code_font: None,
             code_fallbacks: None,
+            code_background: None,
+            code_border: None,
             state,
         }
     }
@@ -84,6 +88,8 @@ impl Inline {
         self.hover_color = style.link_hover_color;
         self.code_font = style.inline_code_font.clone();
         self.code_fallbacks = style.inline_code_fallbacks.clone();
+        self.code_background = style.inline_code_background;
+        self.code_border = style.inline_code_border;
         self.code_ranges = code_ranges;
         self
     }
@@ -261,6 +267,76 @@ impl Inline {
         line_bounds
     }
 
+    /// Boxes for the inline code ranges, when the style asks for rounded,
+    /// bordered chips. Empty otherwise: the run background then does the job.
+    fn code_chips(&self, text_layout: &TextLayout, bounds: &Bounds<Pixels>) -> Vec<CodeChip> {
+        let (Some(border), Some(background)) = (self.code_border, self.code_background) else {
+            return Vec::new();
+        };
+        let line_height = text_layout.line_height();
+        // The chip is shorter than the line box, so chips on neighbouring
+        // lines do not touch, and a hair wider than the text so the glyphs do
+        // not sit on the border.
+        let inset_y = line_height * 0.1;
+        let pad_x = px(2.);
+        let mut ranges = self.code_ranges.clone();
+        ranges.retain(|range| !range.is_empty());
+        ranges.sort_unstable_by_key(|range| range.start);
+
+        let mut chips = Vec::new();
+        for range in ranges {
+            let (Some(start), Some(end)) = (
+                text_layout.position_for_index(range.start),
+                text_layout.position_for_index(range.end),
+            ) else {
+                continue;
+            };
+            if start.y == end.y {
+                chips.push(CodeChip {
+                    bounds: Bounds::from_corners(
+                        point(start.x - pad_x, start.y + inset_y),
+                        point(end.x + pad_x, start.y + line_height - inset_y),
+                    ),
+                    background,
+                    border: Some(border),
+                });
+                continue;
+            }
+            // Wrapped across lines: fill each line, keep the corners square
+            // and skip the border, as a box would be torn at the wrap.
+            let first = Bounds::from_corners(
+                point(start.x - pad_x, start.y + inset_y),
+                point(bounds.right(), start.y + line_height - inset_y),
+            );
+            chips.push(CodeChip {
+                bounds: first,
+                background,
+                border: None,
+            });
+            let mut y = start.y + line_height;
+            while y + line_height <= end.y {
+                chips.push(CodeChip {
+                    bounds: Bounds::from_corners(
+                        point(bounds.left(), y + inset_y),
+                        point(bounds.right(), y + line_height - inset_y),
+                    ),
+                    background,
+                    border: None,
+                });
+                y += line_height;
+            }
+            chips.push(CodeChip {
+                bounds: Bounds::from_corners(
+                    point(bounds.left(), end.y + inset_y),
+                    point(end.x + pad_x, end.y + line_height - inset_y),
+                ),
+                background,
+                border: None,
+            });
+        }
+        chips
+    }
+
     /// Paint the selection background.
     fn paint_selection(
         selection: &Selection,
@@ -436,8 +512,16 @@ impl Element for Inline {
         };
 
         let text_layout = self.styled_text.layout().clone();
+        // Chips go behind the text, their border over it.
+        let chips = self.code_chips(&text_layout, &bounds);
+        for chip in &chips {
+            chip.paint_background(window);
+        }
         self.styled_text
             .paint(global_id, None, bounds, &mut (), &mut (), window, cx);
+        for chip in &chips {
+            chip.paint_border(window);
+        }
 
         // layout selections
         // The state is already locked for this paint. Pass its selection so
@@ -588,6 +672,49 @@ impl Element for Inline {
                 }
             });
         }
+    }
+}
+
+/// One inline code box. `border: Some` means the whole chip fits on a line and
+/// is drawn rounded with an outline; `None` is a square fill for a wrapped part.
+struct CodeChip {
+    bounds: Bounds<Pixels>,
+    background: gpui::Hsla,
+    border: Option<gpui::Hsla>,
+}
+
+impl CodeChip {
+    fn radius(&self) -> Pixels {
+        if self.border.is_some() {
+            px(4.)
+        } else {
+            px(0.)
+        }
+    }
+
+    fn paint_background(&self, window: &mut Window) {
+        window.paint_quad(quad(
+            self.bounds,
+            self.radius(),
+            self.background,
+            Edges::default(),
+            gpui::transparent_black(),
+            BorderStyle::default(),
+        ));
+    }
+
+    fn paint_border(&self, window: &mut Window) {
+        let Some(border) = self.border else {
+            return;
+        };
+        window.paint_quad(quad(
+            self.bounds,
+            self.radius(),
+            gpui::transparent_black(),
+            Edges::all(px(1.)),
+            border,
+            BorderStyle::default(),
+        ));
     }
 }
 

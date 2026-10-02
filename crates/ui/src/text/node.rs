@@ -957,12 +957,16 @@ impl Paragraph {
                     }
                     if style.code {
                         code_ranges.push(inner_range.clone());
-                        highlight.background_color = Some(
-                            node_cx
-                                .style
-                                .inline_code_background
-                                .unwrap_or(cx.theme().accent),
-                        );
+                        // A chip with a border is painted by `Inline` as a rounded
+                        // box behind the text, so the run itself stays unfilled.
+                        if node_cx.style.inline_code_border.is_none() {
+                            highlight.background_color = Some(
+                                node_cx
+                                    .style
+                                    .inline_code_background
+                                    .unwrap_or(cx.theme().accent),
+                            );
+                        }
                         highlight.color = node_cx.style.inline_code_color;
                     }
                     if let Some(color) = style.highlight {
@@ -1096,12 +1100,16 @@ impl Paragraph {
                     }
                     if style.code {
                         code_ranges.push(inner_range.clone());
-                        highlight.background_color = Some(
-                            node_cx
-                                .style
-                                .inline_code_background
-                                .unwrap_or(cx.theme().accent),
-                        );
+                        // A chip with a border is painted by `Inline` as a rounded
+                        // box behind the text, so the run itself stays unfilled.
+                        if node_cx.style.inline_code_border.is_none() {
+                            highlight.background_color = Some(
+                                node_cx
+                                    .style
+                                    .inline_code_background
+                                    .unwrap_or(cx.theme().accent),
+                            );
+                        }
                         highlight.color = node_cx.style.inline_code_color;
                     }
                     if let Some(color) = style.highlight {
@@ -1405,11 +1413,16 @@ impl BlockNode {
                                         .items_start()
                                         .content_start()
                                         .when(!options.todo && checked.is_none(), |this| {
-                                            this.child(list_item_prefix(
+                                            let prefix = list_item_prefix(
                                                 ix,
                                                 options.ordered,
                                                 options.depth,
-                                            ))
+                                            );
+                                            match node_cx.style.list_marker_color {
+                                                Some(color) => this
+                                                    .child(div().text_color(color).child(prefix)),
+                                                None => this.child(prefix),
+                                            }
                                         })
                                         .when_some(*checked, |this, checked| {
                                             // Todo list checkbox
