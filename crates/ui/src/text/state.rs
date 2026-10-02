@@ -897,6 +897,76 @@ mod tests {
     }
 
     #[gpui::test]
+    fn restored_partial_selection_paints_after_reflow(cx: &mut TestAppContext) {
+        struct SelectionView {
+            text: gpui::Entity<TextViewState>,
+            width: Pixels,
+        }
+
+        impl Render for SelectionView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                gpui::div()
+                    .w(self.width)
+                    .child(crate::text::TextView::new(&self.text).selectable(true))
+            }
+        }
+
+        cx.update(crate::init);
+        let (root, vcx) = cx.add_window_view(|window, cx| {
+            let content = cx.new(|cx| SelectionView {
+                text: cx.new(|cx| TextViewState::markdown("alpha beta gamma", cx)),
+                width: px(160.),
+            });
+            crate::Root::new(content, window, cx)
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let view = root.read_with(vcx, |root, _| {
+            root.view().clone().downcast::<SelectionView>().unwrap()
+        });
+        let text = view.read_with(vcx, |view, _| view.text.clone());
+        let inline = text.update(vcx, |text, cx| {
+            let inline = text
+                .parsed_content
+                .document
+                .blocks
+                .iter()
+                .flat_map(node::BlockNode::inline_states)
+                .next()
+                .unwrap();
+            inline.lock().unwrap().selection = Some((6..10).into());
+            let snapshot = text.selection_snapshot().unwrap();
+            text.clear_selection(cx);
+            assert!(text.restore_selection(snapshot, cx));
+            assert!(!text.is_all_selected());
+            inline
+        });
+
+        // Paint the restored ranges at both widths. State-only assertions
+        // cannot catch a nested mutex acquisition in Inline::paint.
+        for width in [500., 80.] {
+            view.update(vcx, |view, cx| {
+                view.width = px(width);
+                cx.notify();
+            });
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            text.read_with(vcx, |text, _| {
+                assert_eq!(text.selected_text().trim(), "beta");
+            });
+            assert_eq!(inline.lock().unwrap().selection, Some((6..10).into()));
+        }
+
+        text.update(vcx, |text, cx| text.clear_selection(cx));
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(text.read_with(vcx, |text, _| text.selected_text().is_empty()));
+    }
+
+    #[gpui::test]
     fn selection_snapshots_preserve_byte_ranges_across_reflow(cx: &mut TestAppContext) {
         cx.update(crate::init);
         let view = cx.update(|cx| cx.new(|cx| TextViewState::markdown("alpha beta", cx)));
