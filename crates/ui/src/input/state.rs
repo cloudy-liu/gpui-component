@@ -31,7 +31,6 @@ use super::{
     number_input,
     number_input::{NumberStep, StepAction},
 };
-use crate::Size;
 use crate::actions::{SelectDown, SelectLeft, SelectRight, SelectUp};
 use crate::highlighter::DiagnosticSet;
 #[cfg(not(target_family = "wasm"))]
@@ -47,6 +46,7 @@ use crate::input::{
 };
 use crate::native_menu::NativeMenu;
 use crate::scroll::AutoScroll;
+use crate::{ActiveTheme as _, Size};
 use crate::{Root, history::History};
 
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
@@ -338,6 +338,7 @@ impl LastLayout {
 
 /// InputState to keep editing state of the [`super::Input`].
 pub struct InputState {
+    pub(super) editor_style: Option<std::sync::Arc<super::CodeEditorStyle>>,
     pub(super) focus_handle: FocusHandle,
     pub(super) mode: InputMode,
     pub(super) text: Rope,
@@ -484,6 +485,7 @@ impl InputState {
 
         Self {
             focus_handle: focus_handle.clone(),
+            editor_style: None,
             text: "".into(),
             display_map: DisplayMap::new(text_style.font(), window.rem_size(), None),
             blink_cursor,
@@ -3052,10 +3054,21 @@ impl Render for InputState {
             .when(self.mode.is_multi_line(), |this| this.h_full())
             .flex_grow_1()
             .overflow_x_hidden()
-            .child(TextElement::new(cx.entity().clone()).placeholder(self.placeholder.clone()))
+            .child(
+                TextElement::new(cx.entity().clone(), self.resolved_editor_style(cx))
+                    .placeholder(self.placeholder.clone()),
+            )
             .children(self.diagnostic_popover.clone())
             .children(self.context_menu_content.as_ref().map(|menu| menu.render()))
             .children(self.hover_popover.clone())
+    }
+}
+
+impl InputState {
+    pub(super) fn resolved_editor_style(&self, cx: &App) -> std::sync::Arc<super::CodeEditorStyle> {
+        self.editor_style
+            .clone()
+            .unwrap_or_else(|| std::sync::Arc::new(super::CodeEditorStyle::from_theme(cx.theme())))
     }
 }
 

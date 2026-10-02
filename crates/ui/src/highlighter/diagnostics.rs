@@ -4,13 +4,13 @@ use std::{
     usize,
 };
 
-use gpui::{px, App, HighlightStyle, Hsla, SharedString, UnderlineStyle};
+use gpui::{App, HighlightStyle, Hsla, SharedString, UnderlineStyle, px};
 use ropey::Rope;
 use sum_tree::{Bias, SeekTarget, SumTree};
 
 use crate::{
-    input::{Position, RopeExt as _},
     ActiveTheme,
+    input::{Position, RopeExt as _},
 };
 
 pub type DiagnosticRelatedInformation = lsp_types::DiagnosticRelatedInformation;
@@ -131,9 +131,11 @@ impl DiagnosticSeverity {
         }
     }
 
-    pub(crate) fn highlight_style(&self, cx: &App) -> HighlightStyle {
-        let theme = &cx.theme().highlight_theme;
-
+    pub(crate) fn highlight_style(
+        &self,
+        theme: &super::HighlightTheme,
+        cx: &App,
+    ) -> HighlightStyle {
         let color = match self {
             Self::Error => Some(theme.style.status.error(cx)),
             Self::Warning => Some(theme.style.status.warning(cx)),
@@ -316,6 +318,7 @@ impl DiagnosticSet {
     pub(crate) fn styles_for_range(
         &self,
         range: &Range<usize>,
+        theme: &super::HighlightTheme,
         cx: &App,
     ) -> Vec<(Range<usize>, HighlightStyle)> {
         if self.diagnostics.is_empty() {
@@ -325,7 +328,7 @@ impl DiagnosticSet {
         let mut styles = vec![];
         for entry in self.range(range.clone()) {
             let range = entry.range.clone();
-            styles.push((range, entry.diagnostic.severity.highlight_style(cx)));
+            styles.push((range, entry.diagnostic.severity.highlight_style(theme, cx)));
         }
 
         styles

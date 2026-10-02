@@ -302,6 +302,15 @@ impl ScrollbarAxis {
     }
 }
 
+/// Instance colors for embedded scrollbars whose content has its own theme.
+#[derive(Clone)]
+pub(crate) struct ScrollbarColors {
+    pub thumb: Background,
+    pub thumb_hover: Background,
+    pub track: Hsla,
+    pub border: Hsla,
+}
+
 /// Scrollbar control for scroll-area or a uniform-list.
 pub struct Scrollbar {
     pub(crate) id: ElementId,
@@ -309,6 +318,7 @@ pub struct Scrollbar {
     scrollbar_show: Option<ScrollbarShow>,
     scroll_handle: Rc<dyn ScrollbarHandle>,
     scroll_size: Option<Size<Pixels>>,
+    colors: Option<ScrollbarColors>,
     /// Maximum frames per second for scrolling by drag. Default is 120 FPS.
     ///
     /// This is used to limit the update rate of the scrollbar when it is
@@ -330,6 +340,7 @@ impl Scrollbar {
             scroll_handle: Rc::new(scroll_handle.clone()),
             max_fps: 120,
             scroll_size: None,
+            colors: None,
         }
     }
 
@@ -367,6 +378,11 @@ impl Scrollbar {
         self
     }
 
+    pub(crate) fn colors(mut self, colors: ScrollbarColors) -> Self {
+        self.colors = Some(colors);
+        self
+    }
+
     /// Set scrollbar axis.
     pub fn axis(mut self, axis: impl Into<ScrollbarAxis>) -> Self {
         self.axis = axis.into();
@@ -388,32 +404,38 @@ impl Scrollbar {
         WIDTH
     }
 
-    fn style_for_active(cx: &App) -> (Background, Hsla, Hsla, Pixels, Pixels, Pixels) {
+    fn style_for_active(
+        colors: &ScrollbarColors,
+    ) -> (Background, Hsla, Hsla, Pixels, Pixels, Pixels) {
         (
-            cx.theme().tokens.scrollbar_thumb_hover.into(),
-            cx.theme().scrollbar,
-            cx.theme().border,
+            colors.thumb_hover,
+            colors.track,
+            colors.border,
             THUMB_ACTIVE_WIDTH,
             THUMB_ACTIVE_INSET,
             THUMB_ACTIVE_RADIUS,
         )
     }
 
-    fn style_for_hovered_thumb(cx: &App) -> (Background, Hsla, Hsla, Pixels, Pixels, Pixels) {
+    fn style_for_hovered_thumb(
+        colors: &ScrollbarColors,
+    ) -> (Background, Hsla, Hsla, Pixels, Pixels, Pixels) {
         (
-            cx.theme().tokens.scrollbar_thumb_hover.into(),
-            cx.theme().scrollbar,
-            cx.theme().border,
+            colors.thumb_hover,
+            colors.track,
+            colors.border,
             THUMB_ACTIVE_WIDTH,
             THUMB_ACTIVE_INSET,
             THUMB_ACTIVE_RADIUS,
         )
     }
 
-    fn style_for_hovered_bar(cx: &App) -> (Background, Hsla, Hsla, Pixels, Pixels, Pixels) {
+    fn style_for_hovered_bar(
+        colors: &ScrollbarColors,
+    ) -> (Background, Hsla, Hsla, Pixels, Pixels, Pixels) {
         (
-            cx.theme().tokens.scrollbar_thumb.into(),
-            cx.theme().scrollbar,
+            colors.thumb,
+            colors.track,
             gpui::transparent_black(),
             THUMB_ACTIVE_WIDTH,
             THUMB_ACTIVE_INSET,
@@ -421,7 +443,11 @@ impl Scrollbar {
         )
     }
 
-    fn style_for_normal(&self, cx: &App) -> (Background, Hsla, Hsla, Pixels, Pixels, Pixels) {
+    fn style_for_normal(
+        &self,
+        colors: &ScrollbarColors,
+        cx: &App,
+    ) -> (Background, Hsla, Hsla, Pixels, Pixels, Pixels) {
         let scrollbar_show = self.scrollbar_show.unwrap_or(cx.theme().scrollbar_show);
         let (width, inset, radius) = match scrollbar_show {
             ScrollbarShow::Scrolling => (THUMB_WIDTH, THUMB_INSET, THUMB_RADIUS),
@@ -429,8 +455,8 @@ impl Scrollbar {
         };
 
         (
-            cx.theme().tokens.scrollbar_thumb.into(),
-            cx.theme().scrollbar,
+            colors.thumb,
+            colors.track,
             gpui::transparent_black(),
             width,
             inset,
@@ -536,6 +562,12 @@ impl Element for Scrollbar {
             .read(cx)
             .clone();
 
+        let colors = self.colors.clone().unwrap_or_else(|| ScrollbarColors {
+            thumb: cx.theme().tokens.scrollbar_thumb.into(),
+            thumb_hover: cx.theme().tokens.scrollbar_thumb_hover.into(),
+            track: cx.theme().scrollbar,
+            border: cx.theme().border,
+        });
         let mut states = vec![];
         let mut has_both = self.axis.is_both();
         let scroll_size = self
@@ -609,20 +641,20 @@ impl Element for Scrollbar {
 
             let (thumb_bg, bar_bg, bar_border, thumb_width, inset, radius) =
                 if state.get().dragged_axis == Some(axis) {
-                    Self::style_for_active(cx)
+                    Self::style_for_active(&colors)
                 } else if is_hover_to_show && (is_hovered_on_bar || is_hovered_on_thumb) {
                     if is_hovered_on_thumb {
-                        Self::style_for_hovered_thumb(cx)
+                        Self::style_for_hovered_thumb(&colors)
                     } else {
-                        Self::style_for_hovered_bar(cx)
+                        Self::style_for_hovered_bar(&colors)
                     }
                 } else if is_offset_changed {
-                    self.style_for_normal(cx)
+                    self.style_for_normal(&colors, cx)
                 } else if is_always_to_show {
                     if is_hovered_on_thumb {
-                        Self::style_for_hovered_thumb(cx)
+                        Self::style_for_hovered_thumb(&colors)
                     } else {
-                        Self::style_for_hovered_bar(cx)
+                        Self::style_for_hovered_bar(&colors)
                     }
                 } else {
                     let mut idle_state = self.style_for_idle(cx);
@@ -632,12 +664,12 @@ impl Element for Scrollbar {
                         if is_hovered_on_bar {
                             state.set(state.get().with_last_scroll_time(Some(Instant::now())));
                             idle_state = if is_hovered_on_thumb {
-                                Self::style_for_hovered_thumb(cx)
+                                Self::style_for_hovered_thumb(&colors)
                             } else {
-                                Self::style_for_hovered_bar(cx)
+                                Self::style_for_hovered_bar(&colors)
                             };
                         } else if elapsed < FADE_OUT_DELAY {
-                            idle_state.0 = cx.theme().tokens.scrollbar_thumb.into();
+                            idle_state.0 = colors.thumb;
 
                             if !state.get().idle_timer_scheduled {
                                 let state = state.clone();
@@ -654,12 +686,7 @@ impl Element for Scrollbar {
                             }
                         } else if elapsed < FADE_OUT_DURATION {
                             let opacity = 1.0 - (elapsed - FADE_OUT_DELAY).powi(10);
-                            idle_state.0 = cx
-                                .theme()
-                                .tokens
-                                .scrollbar_thumb
-                                .background
-                                .opacity(opacity);
+                            idle_state.0 = colors.thumb.opacity(opacity);
 
                             window.request_animation_frame();
                         }
