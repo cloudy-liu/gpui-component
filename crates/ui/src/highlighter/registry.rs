@@ -3,7 +3,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     ops::Deref,
     sync::{Arc, LazyLock, Mutex},
 };
@@ -92,6 +92,10 @@ impl LanguageConfig {
 /// https://docs.rs/tree-sitter-highlight/0.26.8/tree_sitter_highlight/
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash, JsonSchema, Serialize, Deserialize)]
 pub struct SyntaxColors {
+    /// Exact capture styles, including language-specific subroles such as
+    /// `variable.parameter`. Unspecified captures keep the existing fallback.
+    #[serde(flatten)]
+    pub captures: BTreeMap<String, ThemeStyle>,
     pub attribute: Option<ThemeStyle>,
     pub boolean: Option<ThemeStyle>,
     pub comment: Option<ThemeStyle>,
@@ -232,6 +236,10 @@ impl SyntaxColors {
     pub fn style(&self, name: &str) -> Option<HighlightStyle> {
         if name.is_empty() {
             return None;
+        }
+
+        if let Some(style) = self.captures.get(name) {
+            return Some((*style).into());
         }
 
         let style = match name {
