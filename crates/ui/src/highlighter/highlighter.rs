@@ -839,6 +839,11 @@ impl SyntaxHighlighter {
             let mut matches = query_cursor.matches(&query, *query_node, TextProvider(&source));
 
             while let Some(query_match) = matches.next() {
+                // Locals describe scope and bindings; they are not visual
+                // captures. Let highlight patterns choose the token style.
+                if query_match.pattern_index < self.highlights_pattern_index {
+                    continue;
+                }
                 for cap in query_match.captures {
                     let node = cap.node;
 
