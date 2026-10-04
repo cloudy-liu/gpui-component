@@ -292,6 +292,12 @@ fn heading_code_metrics_reflow_without_losing_selection(cx: &mut TestAppContext)
         text.anchor_bounds("before-code-words-code-words-code-words-after")
             .unwrap()
     });
+    // A heading anchor starts at the heading, not after its last text line.
+    assert_eq!(before.top(), px(0.));
+    assert_eq!(
+        text.read_with(vcx, |text, _| text.block_bounds(0).unwrap().top()),
+        px(0.)
+    );
     view.update(vcx, |view, cx| {
         view.style.heading_inline_code[1] = Some(super::InlineCodeStyle {
             padding_x: px(4.8),
@@ -308,6 +314,7 @@ fn heading_code_metrics_reflow_without_losing_selection(cx: &mut TestAppContext)
             .unwrap()
     });
     assert!(after.size.height < before.size.height);
+    assert_eq!(after.top(), px(0.));
     assert_eq!(
         text.read_with(vcx, |text, _| text.selected_text()),
         selected

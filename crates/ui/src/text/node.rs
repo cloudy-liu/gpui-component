@@ -8,13 +8,14 @@ use std::{
 use gpui::{
     AnyElement, App, DefiniteLength, Div, ElementId, FontStyle, FontWeight, Half, HighlightStyle,
     Hsla, InteractiveElement as _, IntoElement, Length, Overflow, ParentElement, ScrollHandle,
-    SharedString, SharedUri, Styled, Window, div, prelude::FluentBuilder as _, px, relative, rems,
+    SharedString, SharedUri, Styled, Window, canvas, div, prelude::FluentBuilder as _, px,
+    relative, rems,
 };
 use markdown::mdast;
 use ropey::Rope;
 
 use crate::{
-    ActiveTheme as _, ElementExt as _, Icon, IconName, StyledExt, h_flex,
+    ActiveTheme as _, Icon, IconName, StyledExt, h_flex,
     highlighter::{HighlightTheme, LanguageRegistry, SyntaxHighlighter},
     input::{InputEdit, Point, RopeExt as _},
     scroll::horizontal_scroll_area,
@@ -1929,6 +1930,7 @@ impl BlockNode {
                 let anchor = anchor.clone();
                 div()
                     .id(SharedString::from(format!("h{}-{}", level, ix)))
+                    .relative()
                     .pb(rems(0.3))
                     .whitespace_normal()
                     .text_size(text_size)
@@ -1938,11 +1940,20 @@ impl BlockNode {
                     )
                     .when(options.ix == 0, |this| this.mt_0())
                     .child(children.render(&heading_cx, window, cx))
-                    .on_prepaint(move |bounds, _, _| {
-                        if let Ok(mut headings) = heading_bounds.lock() {
-                            headings.insert(anchor.clone(), bounds);
-                        }
-                    })
+                    .child(
+                        canvas(
+                            move |bounds, _, _| {
+                                if let Ok(mut headings) = heading_bounds.lock() {
+                                    headings.insert(anchor.clone(), bounds);
+                                }
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
+                    )
                     .into_any_element()
             }
             BlockNode::Blockquote {
