@@ -22,6 +22,35 @@ fn document(source: &str, alerts: bool) -> super::document::ParsedDocument {
 }
 
 #[test]
+fn diff_code_blocks_use_text_span_backgrounds_and_keep_legacy_fallbacks() {
+    let mut theme = HighlightTheme::default_light().as_ref().clone();
+    theme.style.syntax = serde_json::from_value(serde_json::json!({
+        "diff.added": {"color":"#116329", "background_color":"#dafbe1"},
+        "diff.deleted": {"color":"#82071e", "background_color":"#ffebe9"},
+        "diff.hunk": {"color":"#8250df", "font_weight":700}
+    }))
+    .unwrap();
+    let parsed = document("```diff\n@@ -1 +1 @@\n-old\n+new\n```", true);
+    let BlockNode::CodeBlock(block) = &parsed.blocks[0] else {
+        panic!("code block")
+    };
+    let styles = block.styles_for(&Arc::new(theme));
+    for (text, background) in [("+new", 0xdafbe1), ("-old", 0xffebe9)] {
+        let start = block.code().find(text).unwrap();
+        assert!(
+            styles.iter().any(|(range, style)| range.contains(&start)
+                && style.background_color == Some(gpui::rgb(background).into())),
+            "{text}"
+        );
+    }
+    let legacy = HighlightTheme::default_light();
+    let styles = block.styles_for(&legacy);
+    let start = block.code().find("+new").unwrap();
+    assert!(styles.iter().any(|(range, style)| range.contains(&start)
+        && Some(*style) == legacy.style.syntax.style("string")));
+}
+
+#[test]
 fn github_alerts_are_opt_in_and_require_an_unescaped_complete_first_line() {
     for kind in ["NOTE", "TIP", "IMPORTANT", "WARNING", "CAUTION"] {
         let source = format!("> [!{kind}]\n> Body with **emphasis**.");
@@ -310,4 +339,102 @@ fn instance_styles_resources_and_selection_remain_local(cx: &mut TestAppContext)
         assert_eq!(*root.links.lock().unwrap(), vec!["../guide.md#next"])
     });
     assert_eq!(vcx.opened_url(), None);
+}
+
+#[gpui::test]
+fn code_and_keyboard_chips_preserve_copy_and_selection_when_styles_change(cx: &mut TestAppContext) {
+    cx.update(crate::init);
+    let (root, vcx) = cx.add_window_view(|window, cx| {
+        let content = cx.new(|cx| ReadingRoot {
+            local: cx.new(|cx| {
+                TextViewState::markdown(
+                    "Press <kbd>Ctrl</kbd> and `code` beside ordinary text.",
+                    cx,
+                )
+            }),
+            ordinary: cx.new(|cx| TextViewState::markdown("ordinary", cx)),
+            style: TextViewStyle::default(),
+            links: Default::default(),
+            images: Default::default(),
+        });
+        crate::Root::new(content, window, cx)
+    });
+    let view = root.read_with(vcx, |root, _| {
+        root.view().clone().downcast::<ReadingRoot>().unwrap()
+    });
+    let text = view.read_with(vcx, |root, _| root.local.clone());
+    let chips = TextViewStyle {
+        inline_code_background: Some(gpui::rgb(0xf6f8fa).into()),
+        inline_code: Some(super::InlineCodeStyle {
+            radius: px(6.),
+            padding_x: px(5.44),
+            padding_y: px(2.72),
+            font_size: px(13.6),
+        }),
+        keyboard: Some(super::KeyboardStyle {
+            background: gpui::rgb(0xf6f8fa).into(),
+            border: gpui::rgb(0xd1d9e0).into(),
+            shadow: gpui::rgb(0xd1d9e0).into(),
+            radius: px(6.),
+            padding: px(4.),
+            font_size: px(11.),
+            line_height: px(10.),
+        }),
+        ..Default::default()
+    };
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    text.update(vcx, |text, cx| text.select_all(cx));
+    let selected = text.read_with(vcx, |text, _| text.selected_text());
+    assert_eq!(selected.trim(), "Press Ctrl and code beside ordinary text.");
+    for style in [chips.clone(), TextViewStyle::default(), chips] {
+        view.update(vcx, |view, cx| {
+            view.style = style;
+            cx.notify();
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            text.read_with(vcx, |text, _| text.selected_text()),
+            selected
+        );
+    }
+    text.update(vcx, |text, cx| text.clear_selection(cx));
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    // Select across body, kbd and code fragments through the public pointer path.
+    vcx.simulate_mouse_down(
+        gpui::point(px(1.), px(9.)),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::default(),
+    );
+    vcx.simulate_mouse_move(
+        gpui::point(px(200.), px(9.)),
+        Some(gpui::MouseButton::Left),
+        gpui::Modifiers::default(),
+    );
+    vcx.simulate_mouse_up(
+        gpui::point(px(200.), px(9.)),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::default(),
+    );
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let partial = text.read_with(vcx, |text, _| text.selected_text());
+    assert!(
+        partial.contains("Ctrl") && partial.contains("code"),
+        "{partial:?}"
+    );
+    view.update(vcx, |view, cx| {
+        view.style = TextViewStyle::default();
+        cx.notify();
+    });
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert_eq!(text.read_with(vcx, |text, _| text.selected_text()), partial);
 }

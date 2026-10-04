@@ -117,6 +117,8 @@ pub enum FontWeightContent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, JsonSchema, Serialize, Deserialize)]
 pub struct ThemeStyle {
+    #[serde(default)]
+    pub background_color: Option<gpui::Hsla>,
     pub color: Option<gpui::Hsla>,
     pub font_style: Option<FontStyle>,
     pub font_weight: Option<FontWeightContent>,
@@ -126,9 +128,25 @@ impl From<gpui::Hsla> for ThemeStyle {
     fn from(color: gpui::Hsla) -> Self {
         Self {
             color: Some(color),
+            background_color: None,
             font_style: None,
             font_weight: None,
         }
+    }
+}
+
+impl ThemeStyle {
+    pub fn background(mut self, color: Option<gpui::Hsla>) -> Self {
+        self.background_color = color;
+        self
+    }
+    pub fn weight(mut self, weight: FontWeightContent) -> Self {
+        self.font_weight = Some(weight);
+        self
+    }
+    pub fn underline(mut self) -> Self {
+        self.font_style = Some(FontStyle::Underline);
+        self
     }
 }
 
@@ -136,6 +154,13 @@ impl From<ThemeStyle> for HighlightStyle {
     fn from(style: ThemeStyle) -> Self {
         HighlightStyle {
             color: style.color,
+            background_color: style.background_color,
+            underline: (style.font_style == Some(FontStyle::Underline)).then_some(
+                gpui::UnderlineStyle {
+                    thickness: gpui::px(1.),
+                    ..Default::default()
+                },
+            ),
             font_weight: style.font_weight.map(|w| match w {
                 FontWeightContent::Thin => gpui::FontWeight::THIN,
                 FontWeightContent::ExtraLight => gpui::FontWeight::EXTRA_LIGHT,

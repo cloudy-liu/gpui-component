@@ -372,7 +372,10 @@ fn parse_paragraph(paragraph: &mut Paragraph, node: &Rc<Node>) {
             }
             local_name!("br") => paragraph.push_str("\n"),
             local_name!("script") | local_name!("style") => {}
-            local_name!("code") | local_name!("kbd") => {
+            local_name!("kbd") => {
+                merge_children_with_mark(node, paragraph, Some(TextMark::default().keyboard()));
+            }
+            local_name!("code") => {
                 merge_children_with_mark(node, paragraph, Some(TextMark::default().code()));
             }
             local_name!("mark") => {
@@ -477,7 +480,8 @@ pub(super) fn inline_mark(source: &str) -> Option<(String, bool, TextMark)> {
     let mark = match name.as_str() {
         "strong" | "b" => TextMark::default().bold(),
         "em" | "i" => TextMark::default().italic(),
-        "code" | "kbd" => TextMark::default().code(),
+        "kbd" => TextMark::default().keyboard(),
+        "code" => TextMark::default().code(),
         "del" | "s" => TextMark::default().strikethrough(),
         "a" if !close => {
             let dom = parse_document(RcDom::default(), ParseOpts::default()).one(source);

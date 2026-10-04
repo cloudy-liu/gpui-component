@@ -603,7 +603,7 @@ impl Render for TextViewState {
                 state.update(cx, |state, _| {
                     state.update_bounds(bounds);
                 });
-                if size_changed {
+                if size_changed && !state.read(cx).has_restored_selection() {
                     if let Some(root) = window.root::<crate::Root>().flatten() {
                         root.update(cx, |root, cx| {
                             root.clear_text_selection_for_resized_view(id, cx);

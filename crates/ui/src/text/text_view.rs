@@ -316,7 +316,13 @@ impl Element for TextView {
             state.set_markdown_extensions(self.markdown_extensions.clone(), cx);
             state.selectable = self.selectable;
             state.scrollable = self.scrollable;
-            state.text_view_style = self.text_view_style.clone();
+            if state.text_view_style != self.text_view_style {
+                let selection = state.selection_snapshot();
+                state.text_view_style = self.text_view_style.clone();
+                if let Some(selection) = selection {
+                    state.restore_selection(selection, cx);
+                }
+            }
 
             if let Some(text) = self.text.clone() {
                 state.set_text(text.as_str(), cx);

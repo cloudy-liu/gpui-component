@@ -4,9 +4,63 @@ use gpui::{Hsla, Pixels, Rems, StyleRefinement, px, rems};
 
 use crate::highlighter::HighlightTheme;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkUnderline {
+    #[default]
+    Always,
+    Hover,
+    Never,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct AlertStyle {
+    pub container: StyleRefinement,
+    pub title: StyleRefinement,
+    /// Application-supplied icon asset; the component does not select a theme.
+    pub icon: gpui::SharedString,
+    pub icon_size: Pixels,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct InlineCodeStyle {
+    pub radius: Pixels,
+    pub padding_x: Pixels,
+    pub padding_y: Pixels,
+    pub font_size: Pixels,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct KeyboardStyle {
+    pub background: Hsla,
+    pub border: Hsla,
+    pub shadow: Hsla,
+    pub radius: Pixels,
+    pub padding: Pixels,
+    pub font_size: Pixels,
+    pub line_height: Pixels,
+}
+
 /// TextViewStyle used to customize the style for [`TextView`].
 #[derive(Clone)]
 pub struct TextViewStyle {
+    pub bold_weight: gpui::FontWeight,
+    pub link_underline: LinkUnderline,
+    /// 1, i, a at nested depths; false keeps the legacy 1, A, a sequence.
+    pub roman_ordered_lists: bool,
+    pub list_indent: Option<Pixels>,
+    pub list_paragraph_gap: Option<Pixels>,
+    pub alerts: [Option<AlertStyle>; 5],
+    pub table_fill: bool,
+    pub table_radius: Option<Pixels>,
+    /// Space after a table; unset preserves the original one-rem gap.
+    pub table_gap: Option<Pixels>,
+    pub table_stripe: Option<Hsla>,
+    pub table_row_border: Option<Hsla>,
+    pub horizontal_rule: StyleRefinement,
+    pub horizontal_rule_container: StyleRefinement,
+    pub inline_code: Option<InlineCodeStyle>,
+    pub keyboard: Option<KeyboardStyle>,
     /// Gap of each paragraphs, default is 1 rem.
     pub paragraph_gap: Rems,
     /// Base font size for headings, default is 14px.
@@ -61,7 +115,22 @@ pub struct TextViewStyle {
 
 impl PartialEq for TextViewStyle {
     fn eq(&self, other: &Self) -> bool {
-        self.paragraph_gap == other.paragraph_gap
+        self.bold_weight == other.bold_weight
+            && self.link_underline == other.link_underline
+            && self.roman_ordered_lists == other.roman_ordered_lists
+            && self.list_indent == other.list_indent
+            && self.list_paragraph_gap == other.list_paragraph_gap
+            && self.alerts == other.alerts
+            && self.table_fill == other.table_fill
+            && self.table_radius == other.table_radius
+            && self.table_gap == other.table_gap
+            && self.table_stripe == other.table_stripe
+            && self.table_row_border == other.table_row_border
+            && self.horizontal_rule == other.horizontal_rule
+            && self.horizontal_rule_container == other.horizontal_rule_container
+            && self.inline_code == other.inline_code
+            && self.keyboard == other.keyboard
+            && self.paragraph_gap == other.paragraph_gap
             && self.heading_base_font_size == other.heading_base_font_size
             && self.highlight_theme == other.highlight_theme
             && match (&self.heading_font_size, &other.heading_font_size) {
@@ -102,6 +171,21 @@ impl PartialEq for TextViewStyle {
 impl Default for TextViewStyle {
     fn default() -> Self {
         Self {
+            bold_weight: gpui::FontWeight::BOLD,
+            link_underline: LinkUnderline::Always,
+            roman_ordered_lists: false,
+            list_indent: None,
+            list_paragraph_gap: None,
+            alerts: std::array::from_fn(|_| None),
+            table_fill: true,
+            table_radius: None,
+            table_gap: None,
+            table_stripe: None,
+            table_row_border: None,
+            horizontal_rule: StyleRefinement::default(),
+            horizontal_rule_container: StyleRefinement::default(),
+            inline_code: None,
+            keyboard: None,
             paragraph_gap: rems(1.),
             heading_base_font_size: px(14.),
             heading_font_size: None,
