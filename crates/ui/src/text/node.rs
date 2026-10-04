@@ -1433,6 +1433,10 @@ impl BlockNode {
                                                         .list_paragraph_gap
                                                         .unwrap_or(px(0.)))
                                                     .pl(rems(0.75))
+                                                    .when_some(
+                                                        node_cx.style.list_indent,
+                                                        |el, indent| el.pl(indent),
+                                                    )
                                                     .overflow_hidden()
                                                     .child(text),
                                             ),
@@ -1621,7 +1625,14 @@ impl BlockNode {
         // Measure the widest text per column.
         let text_style = window.text_style();
         let font_size = text_style.font_size.to_pixels(window.rem_size());
-        let mut col_w = vec![CELL_MIN_PX; col_count];
+        let mut col_w = vec![
+            if node_cx.style.table_fill {
+                CELL_MIN_PX
+            } else {
+                0.
+            };
+            col_count
+        ];
         for row in table.children.iter() {
             for (ix, cell) in row.children.iter().enumerate() {
                 let Some(slot) = col_w.get_mut(ix) else {
@@ -1716,7 +1727,7 @@ impl BlockNode {
             rows.push(
                 div()
                     .id(("row", row_ix))
-                    .when(row_ix % 2 == 1, |this| {
+                    .when(row_ix > 0 && row_ix % 2 == 0, |this| {
                         this.when_some(style.table_stripe, |this, color| this.bg(color))
                     })
                     .when_some(style.table_hover_background, |this, color| {
@@ -1816,7 +1827,7 @@ impl BlockNode {
             rows.push(
                 div()
                     .id(("row", row_ix))
-                    .when(row_ix % 2 == 1, |this| {
+                    .when(row_ix > 0 && row_ix % 2 == 0, |this| {
                         this.when_some(style.table_stripe, |this, color| this.bg(color))
                     })
                     .when_some(style.table_hover_background, |this, color| {

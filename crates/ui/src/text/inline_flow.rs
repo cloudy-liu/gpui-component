@@ -12,7 +12,7 @@ use gpui::{
 };
 
 use super::{
-    inline::{Inline, InlineState},
+    inline::{ChipKind, Inline, InlineState},
     node::LinkMark,
 };
 
@@ -33,7 +33,7 @@ pub(super) enum InlineFlowItem {
         highlights: Vec<(Range<usize>, HighlightStyle)>,
         code_ranges: Vec<Range<usize>>,
         keyboard_ranges: Vec<Range<usize>>,
-        chip_kind: Option<bool>,
+        chip_kind: Option<ChipKind>,
     },
     Image {
         url: SharedUri,
@@ -79,7 +79,7 @@ enum MeasureItem {
         links: Vec<(Range<usize>, LinkMark)>,
         highlights: Vec<(Range<usize>, HighlightStyle)>,
         code_ranges: Vec<Range<usize>>,
-        chip_kind: Option<bool>,
+        chip_kind: Option<ChipKind>,
     },
     Image {
         url: SharedUri,
@@ -186,7 +186,11 @@ impl InlineFlow {
                             Vec::new()
                         },
                         keyboard_ranges: Vec::new(),
-                        chip_kind: code.then_some(keyboard),
+                        chip_kind: code.then_some(if keyboard {
+                            ChipKind::Keyboard
+                        } else {
+                            ChipKind::Code
+                        }),
                     });
                 }
                 parent.selection = None;
@@ -359,7 +363,12 @@ impl Element for InlineFlow {
                         InlineFlowItem::Text { chip_kind, .. } => *chip_kind,
                         _ => None,
                     };
-                    let (font_size, pad_x, pad_y, text_height) = chip_metrics(
+                    let ChipMetrics {
+                        font_size,
+                        padding_x: pad_x,
+                        padding_y: pad_y,
+                        line_height: text_height,
+                    } = chip_metrics(
                         chip_kind,
                         &self.reading_style,
                         window.text_style().font_size.to_pixels(window.rem_size()),
@@ -374,7 +383,7 @@ impl Element for InlineFlow {
                     .into_any_element();
                     let mut fragment_style = window.text_style();
                     fragment_style.font_size = font_size.into();
-                    if chip_kind == Some(true) {
+                    if chip_kind == Some(ChipKind::Keyboard) {
                         fragment_style.line_height = text_height.into();
                     }
                     window.with_text_style(
@@ -563,8 +572,12 @@ fn layout_flow(
                             reading_style.inline_code_font.as_ref(),
                             reading_style.inline_code_fallbacks.as_ref(),
                         );
-                        let (chip_size, pad_x, pad_y, chip_height) =
-                            chip_metrics(*chip_kind, reading_style, font_size, line_height);
+                        let ChipMetrics {
+                            font_size: chip_size,
+                            padding_x: pad_x,
+                            padding_y: pad_y,
+                            line_height: chip_height,
+                        } = chip_metrics(*chip_kind, reading_style, font_size, line_height);
                         let shaped_line = shape_line(subtext.clone(), chip_size, &runs, window);
                         let width = shaped_line.width() + pad_x * 2.;
                         actual_line_height = actual_line_height.max(chip_height + pad_y * 2.);
@@ -659,6 +672,24 @@ fn line_ranges(
     reading_style: &super::TextViewStyle,
     window: &mut Window,
 ) -> Vec<Range<usize>> {
+    if items.iter().any(|item| {
+        matches!(
+            item,
+            MeasureItem::Text {
+                chip_kind: Some(ChipKind::Code),
+                ..
+            }
+        )
+    }) {
+        return code_line_ranges(
+            items,
+            image_sizes,
+            text_style,
+            wrap_width,
+            reading_style,
+            window,
+        );
+    }
     let rem_size = window.rem_size();
     let font_size = text_style.font_size.to_pixels(rem_size);
     let mut wrapper = window
@@ -698,7 +729,11 @@ fn line_ranges(
                 highlights,
                 ..
             } => {
-                let (chip_size, padding, _, _) = chip_metrics(
+                let ChipMetrics {
+                    font_size: chip_size,
+                    padding_x: padding,
+                    ..
+                } = chip_metrics(
                     Some(*keyboard),
                     reading_style,
                     font_size,
@@ -744,6 +779,170 @@ fn line_ranges(
         }
     }
     append_line(&fragments, start, len);
+    ranges
+}
+
+/// Rebuild the first remaining line after every break so a continuing code
+/// span reserves padding exactly once on each painted line. Keyboard keys stay
+/// atomic; code words and oversized words retain their source-byte boundaries.
+fn code_line_ranges(
+    items: &[MeasureItem],
+    image_sizes: &[Option<Size<Pixels>>],
+    text_style: &TextStyle,
+    wrap_width: Option<Pixels>,
+    reading_style: &super::TextViewStyle,
+    window: &mut Window,
+) -> Vec<Range<usize>> {
+    let font_size = text_style.font_size.to_pixels(window.rem_size());
+    let mut wrapper = window
+        .text_system()
+        .line_wrapper(text_style.font(), font_size);
+    let shaped_chips = items
+        .iter()
+        .map(|item| match item {
+            MeasureItem::Text {
+                text,
+                highlights,
+                code_ranges,
+                chip_kind: Some(kind),
+                ..
+            } => {
+                let metrics =
+                    chip_metrics(Some(*kind), reading_style, font_size, window.line_height());
+                let runs = super::inline::styled_runs(
+                    text,
+                    text_style,
+                    highlights,
+                    code_ranges,
+                    reading_style.inline_code_font.as_ref(),
+                    reading_style.inline_code_fallbacks.as_ref(),
+                );
+                Some(shape_line(text.clone(), metrics.font_size, &runs, window))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let source = items
+        .iter()
+        .map(|item| match item {
+            MeasureItem::Text { text, .. } => text.as_ref(),
+            MeasureItem::Image { .. } => "\0",
+        })
+        .collect::<String>();
+    let mut ranges = Vec::new();
+    let mut hard_start = 0;
+    for hard_line in source.split_inclusive('\n') {
+        let hard_end = hard_start + hard_line.trim_end_matches('\n').len();
+        let mut start = hard_start;
+        if start == hard_end {
+            ranges.push(start..hard_end);
+        }
+        while start < hard_end {
+            let Some(width) = wrap_width else {
+                ranges.push(start..hard_end);
+                break;
+            };
+            let mut fragments = Vec::new();
+            let mut item_start = 0;
+            for (index, item) in items.iter().enumerate() {
+                let item_end = item_start + item.len();
+                let from = start.max(item_start);
+                let to = hard_end.min(item_end);
+                if from < to {
+                    match item {
+                        MeasureItem::Image { .. } => fragments.push(WrapLineFragment::element(
+                            image_sizes[index].unwrap().width,
+                            IMAGE_LEN,
+                        )),
+                        MeasureItem::Text {
+                            text, chip_kind, ..
+                        } => {
+                            let lo = from - item_start;
+                            let hi = to - item_start;
+                            let part = &text[lo..hi];
+                            if let Some(kind) = chip_kind {
+                                let metrics = chip_metrics(
+                                    Some(*kind),
+                                    reading_style,
+                                    font_size,
+                                    window.line_height(),
+                                );
+                                let shaped =
+                                    shaped_chips[index].as_ref().expect("chip was measured");
+                                if *kind == ChipKind::Keyboard {
+                                    fragments.push(WrapLineFragment::element(
+                                        shaped.x_for_index(hi) - shaped.x_for_index(lo)
+                                            + metrics.padding_x * 2.,
+                                        part.len(),
+                                    ));
+                                } else {
+                                    let mut offset = lo;
+                                    let mut padding = metrics.padding_x * 2.;
+                                    let mut measured = px(0.);
+                                    let mut tokens = 0;
+                                    'words: for word in part.split_inclusive(char::is_whitespace) {
+                                        let end = offset + word.len();
+                                        let word_width =
+                                            shaped.x_for_index(end) - shaped.x_for_index(offset);
+                                        if word_width + metrics.padding_x * 2. > width {
+                                            for (ix, character) in word.char_indices() {
+                                                let ix = offset + ix;
+                                                let glyph_width = shaped
+                                                    .x_for_index(ix + character.len_utf8())
+                                                    - shaped.x_for_index(ix);
+                                                fragments.push(WrapLineFragment::element(
+                                                    glyph_width + padding,
+                                                    character.len_utf8(),
+                                                ));
+                                                measured += glyph_width + padding;
+                                                tokens += 1;
+                                                padding = px(0.);
+                                                if measured > width && tokens > 1 {
+                                                    break 'words;
+                                                }
+                                            }
+                                        } else {
+                                            fragments.push(WrapLineFragment::element(
+                                                word_width + padding,
+                                                word.len(),
+                                            ));
+                                            measured += word_width + padding;
+                                            tokens += 1;
+                                            padding = px(0.);
+                                            if measured > width && tokens > 1 {
+                                                break;
+                                            }
+                                        }
+                                        offset = end;
+                                    }
+                                }
+                            } else {
+                                fragments.push(WrapLineFragment::text(part));
+                            }
+                        }
+                    }
+                }
+                item_start = item_end;
+                // Only the first boundary is consumed below. Avoid scanning
+                // the entire remaining suffix for every line of long code.
+                if wrapper.wrap_line(&fragments, width).next().is_some() {
+                    break;
+                }
+            }
+            let end = wrapper
+                .wrap_line(&fragments, width)
+                .next()
+                .map(|boundary| start + boundary.ix)
+                .unwrap_or(hard_end);
+            if end <= start {
+                ranges.push(start..hard_end);
+                break;
+            }
+            ranges.push(start..end);
+            start = end;
+        }
+        hard_start += hard_line.len();
+    }
     ranges
 }
 
@@ -965,26 +1164,43 @@ mod tests {
     }
 }
 
+struct ChipMetrics {
+    font_size: Pixels,
+    padding_x: Pixels,
+    padding_y: Pixels,
+    line_height: Pixels,
+}
+
 fn chip_metrics(
-    kind: Option<bool>,
+    kind: Option<ChipKind>,
     style: &super::TextViewStyle,
     font_size: Pixels,
     line_height: Pixels,
-) -> (Pixels, Pixels, Pixels, Pixels) {
-    if kind == Some(true) {
+) -> ChipMetrics {
+    if kind == Some(ChipKind::Keyboard) {
         if let Some(kbd) = &style.keyboard {
-            return (kbd.font_size, kbd.padding, kbd.padding, kbd.line_height);
+            return ChipMetrics {
+                font_size: kbd.font_size,
+                padding_x: kbd.padding,
+                padding_y: kbd.padding,
+                line_height: kbd.line_height,
+            };
         }
     }
     if kind.is_some() {
         if let Some(code) = &style.inline_code {
-            return (
-                code.font_size,
-                code.padding_x,
-                code.padding_y,
-                line_height * (f32::from(code.font_size) / f32::from(font_size)),
-            );
+            return ChipMetrics {
+                font_size: code.font_size,
+                padding_x: code.padding_x,
+                padding_y: code.padding_y,
+                line_height: line_height * (f32::from(code.font_size) / f32::from(font_size)),
+            };
         }
     }
-    (font_size, px(0.), px(0.), line_height)
+    ChipMetrics {
+        font_size,
+        padding_x: px(0.),
+        padding_y: px(0.),
+        line_height,
+    }
 }

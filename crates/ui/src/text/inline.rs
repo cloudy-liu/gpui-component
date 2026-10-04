@@ -17,6 +17,12 @@ use crate::{
     text::TextViewMultiClickKind, text::node::LinkMark, text::selection::word_range_at,
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ChipKind {
+    Code,
+    Keyboard,
+}
+
 /// A inline element used to render a inline text and support selectable.
 ///
 /// All text in TextView (including the CodeBlock) used this for text rendering.
@@ -34,7 +40,7 @@ pub(super) struct Inline {
     code_border: Option<gpui::Hsla>,
     code_style: Option<super::InlineCodeStyle>,
     link_underline: super::LinkUnderline,
-    chip_kind: Option<bool>,
+    chip_kind: Option<ChipKind>,
     keyboard: Option<super::KeyboardStyle>,
 
     state: Arc<Mutex<InlineState>>,
@@ -168,9 +174,9 @@ impl Inline {
         self
     }
 
-    pub(super) fn chip(mut self, keyboard: bool) -> Self {
-        self.chip_kind = Some(keyboard);
-        if keyboard {
+    pub(super) fn chip(mut self, kind: ChipKind) -> Self {
+        self.chip_kind = Some(kind);
+        if kind == ChipKind::Keyboard {
             if let Some(kbd) = &self.keyboard {
                 self.code_background = Some(kbd.background);
                 self.code_border = Some(kbd.border);
@@ -189,7 +195,7 @@ impl Inline {
             if let Some(code) = &self.code_style {
                 style.font_size = code.font_size.into();
             }
-            if self.chip_kind == Some(true) {
+            if self.chip_kind == Some(ChipKind::Keyboard) {
                 if let Some(kbd) = &self.keyboard {
                     style.line_height = kbd.line_height.into();
                 }
@@ -657,7 +663,7 @@ impl Element for Inline {
             .paint(global_id, None, bounds, &mut (), &mut (), window, cx);
         for chip in &chips {
             chip.paint_border(window);
-            if self.chip_kind == Some(true) {
+            if self.chip_kind == Some(ChipKind::Keyboard) {
                 if let Some(kbd) = &self.keyboard {
                     window.paint_quad(quad(
                         Bounds::from_corners(

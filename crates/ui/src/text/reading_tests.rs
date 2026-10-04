@@ -9,8 +9,8 @@ use crate::{
     highlighter::{HighlightTheme, ThemeStyle},
 };
 use gpui::{
-    AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
-    TestAppContext, Window, div, px,
+    AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
+    Render, Styled as _, TestAppContext, Window, div, px,
 };
 
 fn document(source: &str, alerts: bool) -> super::document::ParsedDocument {
@@ -437,4 +437,103 @@ fn code_and_keyboard_chips_preserve_copy_and_selection_when_styles_change(cx: &m
         let _ = window.draw(cx);
     });
     assert_eq!(text.read_with(vcx, |text, _| text.selected_text()), partial);
+}
+
+#[gpui::test]
+fn inline_code_wraps_at_narrow_width_and_pointer_copy_keeps_all_source_bytes(
+    cx: &mut TestAppContext,
+) {
+    struct NarrowReading {
+        text: Entity<TextViewState>,
+    }
+    impl Render for NarrowReading {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .id("narrow-code")
+                .w(px(180.))
+                .text_size(px(16.))
+                .child(
+                    TextView::new(&self.text)
+                        .selectable(true)
+                        .style(TextViewStyle {
+                            paragraph_gap: gpui::rems(0.),
+                            inline_code: Some(super::InlineCodeStyle {
+                                font_size: px(13.6),
+                                radius: px(6.),
+                                padding_x: px(5.44),
+                                padding_y: px(2.72),
+                            }),
+                            keyboard: Some(super::KeyboardStyle {
+                                background: gpui::rgb(0xf6f8fa).into(),
+                                border: gpui::rgb(0xd1d9e0).into(),
+                                shadow: gpui::rgb(0xd1d9e0).into(),
+                                font_size: px(11.),
+                                line_height: px(10.),
+                                radius: px(6.),
+                                padding: px(4.),
+                            }),
+                            ..Default::default()
+                        }),
+                )
+        }
+    }
+    cx.update(crate::init);
+    let phrase = "ab cd ef gh ij kl mn op qr st uv wx yz";
+    let (root, vcx) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| NarrowReading {
+            text: cx.new(|cx| {
+                TextViewState::markdown(&format!("`{phrase}`\n\n`xx`\n\n<kbd>{phrase}</kbd>"), cx)
+            }),
+        });
+        crate::Root::new(view, window, cx)
+    });
+    let text = root.read_with(vcx, |root, cx| {
+        root.view()
+            .clone()
+            .downcast::<NarrowReading>()
+            .unwrap()
+            .read(cx)
+            .text
+            .clone()
+    });
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let bounds = text.read_with(vcx, |text, _| text.block_bounds(0).unwrap());
+    let single_line = text.read_with(vcx, |text, _| text.block_bounds(1).unwrap().size.height);
+    assert!(
+        bounds.size.height > px(50.),
+        "long code must wrap: {bounds:?}"
+    );
+    assert!(
+        (bounds.size.height - single_line * 2.).abs() < px(1.),
+        "code should fit two lines with padding once per line: {bounds:?}, single line {single_line:?}"
+    );
+    let keyboard_height = text.read_with(vcx, |text, _| text.block_bounds(2).unwrap().size.height);
+    assert!(
+        keyboard_height <= single_line + px(1.),
+        "keyboard labels stay atomic: {keyboard_height:?} vs single code line {single_line:?}"
+    );
+    // This fixture places its only paragraph at the window origin. The block
+    // callback reports its helper canvas position, so use its measured size.
+    let bounds = gpui::Bounds::new(gpui::point(px(0.), px(0.)), bounds.size);
+    vcx.simulate_mouse_down(
+        bounds.origin + gpui::point(px(6.), px(6.)),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::default(),
+    );
+    let end = gpui::point(bounds.right() - px(1.), bounds.bottom() - px(1.));
+    vcx.simulate_mouse_move(
+        end,
+        Some(gpui::MouseButton::Left),
+        gpui::Modifiers::default(),
+    );
+    vcx.simulate_mouse_up(end, gpui::MouseButton::Left, gpui::Modifiers::default());
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert_eq!(
+        text.read_with(vcx, |text, _| text.selected_text()).trim(),
+        phrase
+    );
 }
