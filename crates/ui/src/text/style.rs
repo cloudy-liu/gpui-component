@@ -60,6 +60,8 @@ pub struct TextViewStyle {
     pub horizontal_rule: StyleRefinement,
     pub horizontal_rule_container: StyleRefinement,
     pub inline_code: Option<InlineCodeStyle>,
+    /// Optional per-heading code metrics; unset inherits body metrics with the heading font size.
+    pub heading_inline_code: [Option<InlineCodeStyle>; 6],
     pub keyboard: Option<KeyboardStyle>,
     /// Gap of each paragraphs, default is 1 rem.
     pub paragraph_gap: Rems,
@@ -129,6 +131,7 @@ impl PartialEq for TextViewStyle {
             && self.horizontal_rule == other.horizontal_rule
             && self.horizontal_rule_container == other.horizontal_rule_container
             && self.inline_code == other.inline_code
+            && self.heading_inline_code == other.heading_inline_code
             && self.keyboard == other.keyboard
             && self.paragraph_gap == other.paragraph_gap
             && self.heading_base_font_size == other.heading_base_font_size
@@ -185,6 +188,7 @@ impl Default for TextViewStyle {
             horizontal_rule: StyleRefinement::default(),
             horizontal_rule_container: StyleRefinement::default(),
             inline_code: None,
+            heading_inline_code: std::array::from_fn(|_| None),
             keyboard: None,
             paragraph_gap: rems(1.),
             heading_base_font_size: px(14.),

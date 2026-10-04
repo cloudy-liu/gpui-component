@@ -1913,7 +1913,11 @@ impl BlockNode {
                 }
 
                 let mut heading_cx = node_cx.clone();
-                if let Some(code) = &mut heading_cx.style.inline_code {
+                if let Some(code) =
+                    &node_cx.style.heading_inline_code[usize::from(level.saturating_sub(1)).min(5)]
+                {
+                    heading_cx.style.inline_code = Some(code.clone());
+                } else if let Some(code) = &mut heading_cx.style.inline_code {
                     code.font_size = node_cx.style.headings
                         [usize::from(level.saturating_sub(1)).min(5)]
                     .text

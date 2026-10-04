@@ -255,6 +255,65 @@ struct ReadingRoot {
     images: Arc<Mutex<Vec<String>>>,
 }
 
+#[gpui::test]
+fn heading_code_metrics_reflow_without_losing_selection(cx: &mut TestAppContext) {
+    cx.update(crate::init);
+    let code = super::InlineCodeStyle {
+        radius: px(6.),
+        padding_x: px(120.),
+        padding_y: px(20.),
+        font_size: px(24.),
+    };
+    let (root, vcx) = cx.add_window_view(|window, cx| {
+        let content = cx.new(|cx| ReadingRoot {
+            local: cx.new(|cx| {
+                TextViewState::markdown("## before `code words code words code words` after", cx)
+            }),
+            ordinary: cx.new(|cx| TextViewState::markdown("ordinary", cx)),
+            style: TextViewStyle {
+                inline_code: Some(code.clone()),
+                ..Default::default()
+            },
+            links: Default::default(),
+            images: Default::default(),
+        });
+        crate::Root::new(content, window, cx)
+    });
+    let view = root.read_with(vcx, |root, _| {
+        root.view().clone().downcast::<ReadingRoot>().unwrap()
+    });
+    let text = view.read_with(vcx, |root, _| root.local.clone());
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    text.update(vcx, |text, cx| text.select_all(cx));
+    let selected = text.read_with(vcx, |text, _| text.selected_text());
+    let before = text.read_with(vcx, |text, _| {
+        text.anchor_bounds("before-code-words-code-words-code-words-after")
+            .unwrap()
+    });
+    view.update(vcx, |view, cx| {
+        view.style.heading_inline_code[1] = Some(super::InlineCodeStyle {
+            padding_x: px(4.8),
+            padding_y: px(0.),
+            ..code
+        });
+        cx.notify();
+    });
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let after = text.read_with(vcx, |text, _| {
+        text.anchor_bounds("before-code-words-code-words-code-words-after")
+            .unwrap()
+    });
+    assert!(after.size.height < before.size.height);
+    assert_eq!(
+        text.read_with(vcx, |text, _| text.selected_text()),
+        selected
+    );
+}
+
 impl Render for ReadingRoot {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let links = self.links.clone();
