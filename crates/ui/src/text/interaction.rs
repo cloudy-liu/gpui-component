@@ -75,6 +75,7 @@ impl TextViewInteractions {
                 let failed = alt.clone();
                 let loading = alt.clone();
                 img(source)
+                    .id("playback")
                     .object_fit(ObjectFit::Contain)
                     .max_w(relative(1.))
                     .when_some(width, |this, width| this.w(width))
