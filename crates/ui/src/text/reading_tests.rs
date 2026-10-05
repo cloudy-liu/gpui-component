@@ -22,6 +22,7 @@ fn document(source: &str, alerts: bool) -> super::document::ParsedDocument {
 }
 
 #[test]
+#[cfg(feature = "tree-sitter-diff")]
 fn diff_code_blocks_use_text_span_backgrounds_and_keep_legacy_fallbacks() {
     let mut theme = HighlightTheme::default_light().as_ref().clone();
     theme.style.syntax = serde_json::from_value(serde_json::json!({
@@ -342,6 +343,113 @@ impl Render for ReadingRoot {
 }
 
 #[gpui::test]
+fn fractional_code_chip_keeps_every_character_on_the_selected_line(cx: &mut TestAppContext) {
+    cx.update(crate::init);
+    let (root, vcx) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| ReadingRoot {
+            local: cx.new(|cx| TextViewState::markdown("Leading text `code` trailing text", cx)),
+            ordinary: cx.new(|cx| TextViewState::markdown("", cx)),
+            style: TextViewStyle {
+                inline_code: Some(super::InlineCodeStyle {
+                    radius: px(6.),
+                    padding_x: px(5.44),
+                    padding_y: px(2.72),
+                    font_size: px(13.6),
+                }),
+                ..Default::default()
+            },
+            links: Default::default(),
+            images: Default::default(),
+        });
+        crate::Root::new(view, window, cx)
+    });
+    let text = root.read_with(vcx, |root, cx| {
+        root.view()
+            .clone()
+            .downcast::<ReadingRoot>()
+            .unwrap()
+            .read(cx)
+            .local
+            .clone()
+    });
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    vcx.simulate_mouse_down(
+        gpui::point(px(0.), px(10.)),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::default(),
+    );
+    vcx.simulate_mouse_move(
+        gpui::point(px(479.), px(10.)),
+        Some(gpui::MouseButton::Left),
+        gpui::Modifiers::default(),
+    );
+    vcx.simulate_mouse_up(
+        gpui::point(px(479.), px(10.)),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::default(),
+    );
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert_eq!(
+        text.read_with(vcx, |text, _| text.selected_text()).trim(),
+        "Leading text code trailing text"
+    );
+}
+
+#[gpui::test]
+fn heading_layout_keeps_the_inherited_font_when_measurement_is_deferred(cx: &mut TestAppContext) {
+    cx.update(crate::init);
+    let (root, vcx) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| ReadingRoot {
+            local: cx.new(|cx| TextViewState::markdown("## Heading with `inline code`", cx)),
+            ordinary: cx.new(|cx| TextViewState::markdown("", cx)),
+            style: TextViewStyle {
+                headings: std::array::from_fn(|_| {
+                    let mut heading = div()
+                        .text_size(px(24.))
+                        .line_height(gpui::relative(1.25))
+                        .pb_0();
+                    heading.style().clone()
+                }),
+                inline_code: Some(super::InlineCodeStyle {
+                    radius: px(6.),
+                    padding_x: px(4.8),
+                    padding_y: px(0.),
+                    font_size: px(24.),
+                }),
+                ..Default::default()
+            },
+            links: Default::default(),
+            images: Default::default(),
+        });
+        crate::Root::new(view, window, cx)
+    });
+    let text = root.read_with(vcx, |root, cx| {
+        root.view()
+            .clone()
+            .downcast::<ReadingRoot>()
+            .unwrap()
+            .read(cx)
+            .local
+            .clone()
+    });
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let bounds = text.read_with(vcx, |text, _| {
+        text.anchor_bounds("heading-with-inline-code").unwrap()
+    });
+    assert_eq!(
+        bounds.size.height,
+        px(30.),
+        "heading layout must use 24px / 1.25 metrics, not the ambient body font"
+    );
+}
+
+#[gpui::test]
 fn instance_styles_resources_and_selection_remain_local(cx: &mut TestAppContext) {
     cx.update(crate::init);
     let (root, vcx) = cx.add_window_view(|window, cx| {
@@ -405,6 +513,52 @@ fn instance_styles_resources_and_selection_remain_local(cx: &mut TestAppContext)
         assert_eq!(*root.links.lock().unwrap(), vec!["../guide.md#next"])
     });
     assert_eq!(vcx.opened_url(), None);
+}
+
+#[gpui::test]
+fn heading_permalink_receives_clicks_outside_the_heading_text(cx: &mut TestAppContext) {
+    struct PermalinkRoot {
+        text: Entity<TextViewState>,
+        links: Arc<Mutex<Vec<String>>>,
+    }
+    impl Render for PermalinkRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let links = self.links.clone();
+            div().p(px(32.)).child(
+                TextView::new(&self.text)
+                    .selectable(true)
+                    .style(TextViewStyle {
+                        heading_permalink_icon: Some("icons/link.svg".into()),
+                        ..Default::default()
+                    })
+                    .on_link(move |url, _, _| links.lock().unwrap().push(url.to_owned())),
+            )
+        }
+    }
+    cx.update(crate::init);
+    let (root, vcx) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| PermalinkRoot {
+            text: cx.new(|cx| TextViewState::markdown("## Target", cx)),
+            links: Default::default(),
+        });
+        crate::Root::new(view, window, cx)
+    });
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    vcx.simulate_mouse_move(
+        gpui::point(px(50.), px(42.)),
+        None,
+        gpui::Modifiers::default(),
+    );
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    vcx.simulate_click(gpui::point(px(16.), px(42.)), gpui::Modifiers::default());
+    root.read_with(vcx, |root, cx| {
+        let view = root.view().clone().downcast::<PermalinkRoot>().unwrap();
+        assert_eq!(*view.read(cx).links.lock().unwrap(), vec!["#target"]);
+    });
 }
 
 #[gpui::test]

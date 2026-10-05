@@ -22,11 +22,14 @@ pub enum TextViewImageSource {
 pub(super) type LinkHandler = dyn Fn(&str, &mut Window, &mut App) + Send + Sync;
 pub(super) type ImageResolver =
     dyn Fn(&SharedUri, &mut Window, &mut App) -> TextViewImageSource + Send + Sync;
+pub(super) type ImageActions =
+    dyn Fn(&SharedUri, &mut Window, &mut App) -> Option<AnyElement> + Send + Sync;
 
 #[derive(Clone, Default)]
 pub(super) struct TextViewInteractions {
     pub on_link: Option<Arc<LinkHandler>>,
     pub image_source: Option<Arc<ImageResolver>>,
+    pub image_actions: Option<Arc<ImageActions>>,
 }
 
 impl TextViewInteractions {
@@ -76,13 +79,27 @@ impl TextViewInteractions {
                     .max_w(relative(1.))
                     .when_some(width, |this, width| this.w(width))
                     .when_some(height, |this, height| this.h(height))
-                    .with_loading(move || div().child(format!("{} …", loading)).into_any_element())
-                    .with_fallback(move || div().child(format!("[{}]", failed)).into_any_element())
+                    .with_loading(move || {
+                        div()
+                            .whitespace_nowrap()
+                            .child(format!("{} …", loading))
+                            .into_any_element()
+                    })
+                    .with_fallback(move || {
+                        div()
+                            .whitespace_nowrap()
+                            .child(format!("[{}]", failed))
+                            .into_any_element()
+                    })
                     .into_any_element()
             }
-            TextViewImageSource::Loading => div().child(format!("{} …", alt)).into_any_element(),
+            TextViewImageSource::Loading => div()
+                .whitespace_nowrap()
+                .child(format!("{} …", alt))
+                .into_any_element(),
             TextViewImageSource::Failed(error) => div()
                 .id("image-error")
+                .whitespace_nowrap()
                 .child(format!("[{}]", alt))
                 .tooltip(move |window, cx| Tooltip::new(error.clone()).build(window, cx))
                 .into_any_element(),
@@ -90,8 +107,26 @@ impl TextViewInteractions {
         let interactions = self.clone();
         div()
             .id(("image", ix))
+            .relative()
             .max_w(relative(1.))
             .child(content)
+            .when_some(
+                self.image_actions
+                    .as_ref()
+                    .and_then(|actions| actions(url, window, cx)),
+                |this, actions| {
+                    this.child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation()
+                            })
+                            .child(actions),
+                    )
+                },
+            )
             .when_some(link.clone(), |this, link| {
                 this.cursor_pointer()
                     .tooltip(move |window, cx| Tooltip::new(alt.clone()).build(window, cx))

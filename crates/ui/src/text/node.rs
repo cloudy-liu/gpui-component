@@ -8,8 +8,8 @@ use std::{
 use gpui::{
     AnyElement, App, DefiniteLength, Div, ElementId, FontStyle, FontWeight, Half, HighlightStyle,
     Hsla, InteractiveElement as _, IntoElement, Length, Overflow, ParentElement, ScrollHandle,
-    SharedString, SharedUri, Styled, Window, canvas, div, prelude::FluentBuilder as _, px,
-    relative, rems,
+    SharedString, SharedUri, StatefulInteractiveElement as _, Styled, Window, canvas, div,
+    prelude::FluentBuilder as _, px, relative, rems,
 };
 use markdown::mdast;
 use ropey::Rope;
@@ -642,7 +642,15 @@ impl Paragraph {
 #[derive(Debug, Clone)]
 pub struct CodeBlock {
     lang: Option<SharedString>,
-    styles: Arc<Mutex<Option<(Arc<HighlightTheme>, Vec<(Range<usize>, HighlightStyle)>)>>>,
+    styles: Arc<
+        Mutex<
+            Option<(
+                Arc<HighlightTheme>,
+                SharedString,
+                Vec<(Range<usize>, HighlightStyle)>,
+            )>,
+        >,
+    >,
     state: Arc<Mutex<InlineState>>,
     pub span: Option<Span>,
 }
@@ -691,11 +699,20 @@ impl CodeBlock {
         self.styles_for(&HighlightTheme::default_light())
     }
 
+    #[cfg(test)]
     pub(super) fn styles_for(
         &self,
         theme: &Arc<HighlightTheme>,
     ) -> Vec<(Range<usize>, HighlightStyle)> {
-        let Some(lang) = &self.lang else {
+        self.styles_for_language(theme, self.lang.as_ref())
+    }
+
+    fn styles_for_language(
+        &self,
+        theme: &Arc<HighlightTheme>,
+        language: Option<&SharedString>,
+    ) -> Vec<(Range<usize>, HighlightStyle)> {
+        let Some(lang) = language else {
             return Vec::new();
         };
 
@@ -703,8 +720,10 @@ impl CodeBlock {
             return Vec::new();
         };
 
-        if let Some((cached_theme, cached_styles)) = styles.as_ref() {
-            if Arc::ptr_eq(cached_theme, theme) || cached_theme == theme {
+        if let Some((cached_theme, cached_language, cached_styles)) = styles.as_ref() {
+            if cached_language == lang
+                && (Arc::ptr_eq(cached_theme, theme) || cached_theme == theme)
+            {
                 return cached_styles.clone();
             }
         }
@@ -738,7 +757,7 @@ impl CodeBlock {
             highlighter.update(Some(edit), &code_rope, None);
             highlighter.styles(&(0..code.len()), theme)
         });
-        *styles = Some((theme.clone(), computed_styles.clone()));
+        *styles = Some((theme.clone(), lang.clone(), computed_styles.clone()));
         computed_styles
     }
 
@@ -779,7 +798,12 @@ impl CodeBlock {
             "code",
             self.state.clone(),
             vec![],
-            self.styles_for(&style.highlight_theme),
+            self.styles_for_language(
+                &style.highlight_theme,
+                self.lang
+                    .as_ref()
+                    .map(|lang| style.code_block_languages.get(lang).unwrap_or(lang)),
+            ),
         );
         let mut block_style = style.code_block.clone();
         let code = if block_style.overflow.x == Some(Overflow::Scroll) {
@@ -1522,7 +1546,21 @@ impl BlockNode {
                                                                     .size_2()
                                                                     .text_xs(),
                                                             )
-                                                    }),
+                                                    })
+                                                    .when_some(
+                                                        node_cx.style.task_checkbox.as_ref(),
+                                                        |this, style| {
+                                                            this.size(style.size)
+                                                                .rounded(style.radius)
+                                                                .border_color(style.border)
+                                                                .bg(if checked {
+                                                                    style.checked_background
+                                                                } else {
+                                                                    style.background
+                                                                })
+                                                                .text_color(style.foreground)
+                                                        },
+                                                    ),
                                             )
                                         })
                                         .child(
@@ -1928,8 +1966,11 @@ impl BlockNode {
                 }
                 let heading_bounds = node_cx.heading_bounds.clone();
                 let anchor = anchor.clone();
+                let permalink = format!("#{anchor}");
+                let interactions = node_cx.interactions.clone();
                 div()
                     .id(SharedString::from(format!("h{}-{}", level, ix)))
+                    .group("markdown-heading")
                     .relative()
                     .pb(rems(0.3))
                     .whitespace_normal()
@@ -1940,6 +1981,34 @@ impl BlockNode {
                     )
                     .when(options.ix == 0, |this| this.mt_0())
                     .child(children.render(&heading_cx, window, cx))
+                    .when_some(
+                        node_cx.style.heading_permalink_icon.clone(),
+                        |this, icon| {
+                            this.child(
+                                div()
+                                    .id(("heading-permalink", ix))
+                                    .absolute()
+                                    .left(px(-24.))
+                                    .top(px(6.))
+                                    .size(px(20.))
+                                    .opacity(0.)
+                                    .group_hover("markdown-heading", |style| style.opacity(1.))
+                                    .hover(|style| style.opacity(1.))
+                                    .cursor_pointer()
+                                    .text_color(
+                                        node_cx.style.link_color.unwrap_or(cx.theme().primary),
+                                    )
+                                    .child(Icon::default().path(icon).size(px(16.)))
+                                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
+                                    .on_click(move |_, window, cx| {
+                                        cx.stop_propagation();
+                                        interactions.open_link(&permalink, window, cx);
+                                    }),
+                            )
+                        },
+                    )
                     .child(
                         canvas(
                             move |bounds, _, _| {
@@ -2021,7 +2090,13 @@ impl BlockNode {
                                                     _ => IconName::Info,
                                                 }),
                                             })
-                                            .child(alert),
+                                            .child(if alert_style.is_some() {
+                                                let mut label = alert.to_ascii_lowercase();
+                                                label[..1].make_ascii_uppercase();
+                                                SharedString::from(label)
+                                            } else {
+                                                alert
+                                            }),
                                     )
                             })
                             .children({

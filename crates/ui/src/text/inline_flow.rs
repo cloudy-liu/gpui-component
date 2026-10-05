@@ -83,6 +83,7 @@ enum MeasureItem {
     },
     Image {
         url: SharedUri,
+        title: String,
         width: Option<DefiniteLength>,
         height: Option<DefiniteLength>,
     },
@@ -236,9 +237,15 @@ impl Element for InlineFlow {
             .iter()
             .enumerate()
             .map(|(ix, item)| match item {
-                MeasureItem::Image { url, width, height } => Some(measure_image_size(
+                MeasureItem::Image {
+                    url,
+                    title,
+                    width,
+                    height,
+                } => Some(measure_image_size(
                     ix,
                     url,
+                    title,
                     *width,
                     *height,
                     line_height,
@@ -253,10 +260,12 @@ impl Element for InlineFlow {
         let layout_state = InlineFlowLayoutState::default();
         let layout_ref = layout_state.layout.clone();
         let reading_style = self.reading_style.clone();
+        // Layout callbacks run after the parent's text-style scope has ended.
+        // Capture the inherited heading/body font here, while it is in scope.
+        let text_style = window.text_style();
 
         let layout_id = window.request_measured_layout(Default::default(), {
             move |known_dimensions, available_space, window, _cx| {
-                let text_style = window.text_style();
                 let wrap_width = if text_style.white_space == WhiteSpace::Normal {
                     known_dimensions.width.or(match available_space.width {
                         AvailableSpace::Definite(width) => Some(width),
@@ -390,6 +399,11 @@ impl Element for InlineFlow {
                         Some(gpui::TextStyleRefinement {
                             font_size: Some(fragment_style.font_size),
                             line_height: Some(fragment_style.line_height),
+                            // InlineFlow already chose the line breaks. The
+                            // child layout rounds fractional widths at the
+                            // device scale; wrapping again can move its last
+                            // word below the next positioned code fragment.
+                            white_space: Some(WhiteSpace::Nowrap),
                             ..Default::default()
                         }),
                         |window| {
@@ -481,9 +495,14 @@ impl From<&InlineFlowItem> for MeasureItem {
                 },
             },
             InlineFlowItem::Image {
-                url, width, height, ..
+                url,
+                title,
+                width,
+                height,
+                ..
             } => MeasureItem::Image {
                 url: url.clone(),
+                title: title.clone(),
                 width: *width,
                 height: *height,
             },
@@ -508,7 +527,7 @@ fn layout_flow(
     reading_style: &super::TextViewStyle,
     window: &mut Window,
 ) -> InlineFlowLayout {
-    let line_height = window.line_height();
+    let line_height = text_style.line_height_in_pixels(window.rem_size());
     let rem_size = window.rem_size();
     let total_len = items.iter().map(MeasureItem::len).sum::<usize>();
     if total_len == 0 {
@@ -737,7 +756,7 @@ fn line_ranges(
                     Some(*keyboard),
                     reading_style,
                     font_size,
-                    window.line_height(),
+                    text_style.line_height_in_pixels(window.rem_size()),
                 );
                 let runs = super::inline::styled_runs(
                     text,
@@ -807,8 +826,12 @@ fn code_line_ranges(
                 chip_kind: Some(kind),
                 ..
             } => {
-                let metrics =
-                    chip_metrics(Some(*kind), reading_style, font_size, window.line_height());
+                let metrics = chip_metrics(
+                    Some(*kind),
+                    reading_style,
+                    font_size,
+                    text_style.line_height_in_pixels(window.rem_size()),
+                );
                 let runs = super::inline::styled_runs(
                     text,
                     text_style,
@@ -865,7 +888,7 @@ fn code_line_ranges(
                                     Some(*kind),
                                     reading_style,
                                     font_size,
-                                    window.line_height(),
+                                    text_style.line_height_in_pixels(window.rem_size()),
                                 );
                                 let shaped =
                                     shaped_chips[index].as_ref().expect("chip was measured");
@@ -950,6 +973,7 @@ fn code_line_ranges(
 fn measure_image_size(
     ix: usize,
     url: &SharedUri,
+    title: &str,
     width: Option<DefiniteLength>,
     height: Option<DefiniteLength>,
     line_height: Pixels,
@@ -963,6 +987,28 @@ fn measure_image_size(
     } else {
         intrinsic_image_size(ix, url, width, height, interactions, window, cx)
     };
+    if intrinsic_size.is_none() && width.is_none() && height.is_none() {
+        // Loading/error alt text needs its own width; a square image placeholder
+        // would wrap badge labels one character per line.
+        let alt = if title.is_empty() { "Image" } else { title };
+        let text = SharedString::from(format!("[{alt}] …"));
+        let style = window.text_style();
+        let run = TextRun {
+            len: text.len(),
+            font: style.font(),
+            color: style.color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        return size(
+            window
+                .text_system()
+                .shape_line(text, style.font_size.to_pixels(rem_size), &[run], None)
+                .width,
+            line_height,
+        );
+    }
     image_size(width, height, intrinsic_size, line_height, rem_size)
 }
 
@@ -1127,6 +1173,7 @@ mod tests {
                 text("before\n"),
                 MeasureItem::Image {
                     url: "icon.svg".into(),
+                    title: "icon".into(),
                     width: None,
                     height: None,
                 },

@@ -41,9 +41,21 @@ pub struct KeyboardStyle {
     pub line_height: Pixels,
 }
 
+#[derive(Clone, PartialEq)]
+pub struct TaskCheckboxStyle {
+    pub size: Pixels,
+    pub radius: Pixels,
+    pub border: Hsla,
+    pub background: Hsla,
+    pub checked_background: Hsla,
+    pub foreground: Hsla,
+}
+
 /// TextViewStyle used to customize the style for [`TextView`].
 #[derive(Clone)]
 pub struct TextViewStyle {
+    pub heading_permalink_icon: Option<gpui::SharedString>,
+    pub task_checkbox: Option<TaskCheckboxStyle>,
     pub bold_weight: gpui::FontWeight,
     pub link_underline: LinkUnderline,
     /// 1, i, a at nested depths; false keeps the legacy 1, A, a sequence.
@@ -74,6 +86,9 @@ pub struct TextViewStyle {
     pub heading_font_size: Option<Arc<dyn Fn(u8, Pixels) -> Pixels + Send + Sync + 'static>>,
     /// Highlight theme for code blocks. Default: [`HighlightTheme::default_light()`]
     pub highlight_theme: Arc<HighlightTheme>,
+    /// Owner-specific grammar aliases for fenced code; ordinary callers keep
+    /// the registry's default language names.
+    pub code_block_languages: std::collections::HashMap<gpui::SharedString, gpui::SharedString>,
     /// The style refinement for code blocks.
     pub code_block: StyleRefinement,
     /// Style refinement applied to the table container (the bordered wrapper).
@@ -117,7 +132,9 @@ pub struct TextViewStyle {
 
 impl PartialEq for TextViewStyle {
     fn eq(&self, other: &Self) -> bool {
-        self.bold_weight == other.bold_weight
+        self.heading_permalink_icon == other.heading_permalink_icon
+            && self.task_checkbox == other.task_checkbox
+            && self.bold_weight == other.bold_weight
             && self.link_underline == other.link_underline
             && self.roman_ordered_lists == other.roman_ordered_lists
             && self.list_indent == other.list_indent
@@ -136,6 +153,7 @@ impl PartialEq for TextViewStyle {
             && self.paragraph_gap == other.paragraph_gap
             && self.heading_base_font_size == other.heading_base_font_size
             && self.highlight_theme == other.highlight_theme
+            && self.code_block_languages == other.code_block_languages
             && match (&self.heading_font_size, &other.heading_font_size) {
                 (Some(a), Some(b)) => Arc::ptr_eq(a, b),
                 (None, None) => true,
@@ -174,6 +192,8 @@ impl PartialEq for TextViewStyle {
 impl Default for TextViewStyle {
     fn default() -> Self {
         Self {
+            heading_permalink_icon: None,
+            task_checkbox: None,
             bold_weight: gpui::FontWeight::BOLD,
             link_underline: LinkUnderline::Always,
             roman_ordered_lists: false,
@@ -194,6 +214,7 @@ impl Default for TextViewStyle {
             heading_base_font_size: px(14.),
             heading_font_size: None,
             highlight_theme: HighlightTheme::default_light().clone(),
+            code_block_languages: Default::default(),
             code_block: StyleRefinement::default(),
             table: StyleRefinement::default(),
             table_cell: StyleRefinement::default(),
