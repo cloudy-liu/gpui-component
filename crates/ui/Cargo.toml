@@ -215,6 +215,7 @@ windows = { workspace = true, features = [
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+image = "0.25"
 indoc = "2"
 
 [lints]

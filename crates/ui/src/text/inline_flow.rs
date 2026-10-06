@@ -12,7 +12,7 @@ use gpui::{
 };
 
 use super::{
-    inline::{Inline, InlineState},
+    inline::{ChipKind, Inline, InlineState},
     node::LinkMark,
 };
 
@@ -32,6 +32,8 @@ pub(super) enum InlineFlowItem {
         links: Vec<(Range<usize>, LinkMark)>,
         highlights: Vec<(Range<usize>, HighlightStyle)>,
         code_ranges: Vec<Range<usize>>,
+        keyboard_ranges: Vec<Range<usize>>,
+        chip_kind: Option<ChipKind>,
     },
     Image {
         url: SharedUri,
@@ -77,9 +79,11 @@ enum MeasureItem {
         links: Vec<(Range<usize>, LinkMark)>,
         highlights: Vec<(Range<usize>, HighlightStyle)>,
         code_ranges: Vec<Range<usize>>,
+        chip_kind: Option<ChipKind>,
     },
     Image {
         url: SharedUri,
+        title: String,
         width: Option<DefiniteLength>,
         height: Option<DefiniteLength>,
     },
@@ -120,6 +124,80 @@ impl InlineFlow {
     }
 
     pub(super) fn reading_style(mut self, style: super::TextViewStyle) -> Self {
+        if style.inline_code.is_some() || style.keyboard.is_some() {
+            let mut split = Vec::new();
+            for item in self.items {
+                let InlineFlowItem::Text {
+                    state,
+                    text,
+                    links,
+                    highlights,
+                    code_ranges,
+                    keyboard_ranges,
+                    ..
+                } = item
+                else {
+                    split.push(item);
+                    continue;
+                };
+                if code_ranges.is_empty() {
+                    split.push(InlineFlowItem::Text {
+                        state,
+                        text,
+                        links,
+                        highlights,
+                        code_ranges,
+                        keyboard_ranges,
+                        chip_kind: None,
+                    });
+                    continue;
+                }
+                let mut boundaries = vec![0, text.len()];
+                for range in &code_ranges {
+                    boundaries.extend([range.start, range.end]);
+                }
+                boundaries.sort_unstable();
+                boundaries.dedup();
+                let mut parent = state.lock().expect("inline state");
+                parent.text = text.clone();
+                let previous = parent.fragments.clone();
+                parent.fragments.clear();
+                for pair in boundaries.windows(2) {
+                    let (start, end) = (pair[0], pair[1]);
+                    let fragment = previous.get(&(start, end)).cloned().unwrap_or_default();
+                    if let Ok(mut child) = fragment.lock() {
+                        child.text = SharedString::from(text[start..end].to_string());
+                        if let Some(selection) = parent.selection {
+                            let lo = selection.start.max(start);
+                            let hi = selection.end.min(end);
+                            child.selection = (lo < hi).then(|| (lo - start..hi - start).into());
+                        }
+                    }
+                    parent.fragments.insert((start, end), fragment.clone());
+                    let code = code_ranges.iter().any(|r| r.contains(&start));
+                    let keyboard = keyboard_ranges.iter().any(|r| r.contains(&start));
+                    split.push(InlineFlowItem::Text {
+                        state: fragment,
+                        text: SharedString::from(text[start..end].to_string()),
+                        links: slice_ranges(&links, start, end, |r, l| (r, l.clone())),
+                        highlights: slice_ranges(&highlights, start, end, |r, h| (r, *h)),
+                        code_ranges: if code {
+                            vec![0..end - start]
+                        } else {
+                            Vec::new()
+                        },
+                        keyboard_ranges: Vec::new(),
+                        chip_kind: code.then_some(if keyboard {
+                            ChipKind::Keyboard
+                        } else {
+                            ChipKind::Code
+                        }),
+                    });
+                }
+                parent.selection = None;
+            }
+            self.items = split;
+        }
         self.reading_style = style;
         self
     }
@@ -159,9 +237,15 @@ impl Element for InlineFlow {
             .iter()
             .enumerate()
             .map(|(ix, item)| match item {
-                MeasureItem::Image { url, width, height } => Some(measure_image_size(
+                MeasureItem::Image {
+                    url,
+                    title,
+                    width,
+                    height,
+                } => Some(measure_image_size(
                     ix,
                     url,
+                    title,
                     *width,
                     *height,
                     line_height,
@@ -176,10 +260,12 @@ impl Element for InlineFlow {
         let layout_state = InlineFlowLayoutState::default();
         let layout_ref = layout_state.layout.clone();
         let reading_style = self.reading_style.clone();
+        // Layout callbacks run after the parent's text-style scope has ended.
+        // Capture the inherited heading/body font here, while it is in scope.
+        let text_style = window.text_style();
 
         let layout_id = window.request_measured_layout(Default::default(), {
             move |known_dimensions, available_space, window, _cx| {
-                let text_style = window.text_style();
                 let wrap_width = if text_style.white_space == WhiteSpace::Normal {
                     known_dimensions.width.or(match available_space.width {
                         AvailableSpace::Definite(width) => Some(width),
@@ -224,6 +310,16 @@ impl Element for InlineFlow {
             .unwrap_or_default();
         let mut elements = Vec::with_capacity(fragments.len());
 
+        // Fold last frame's wrapped pieces back into their source ranges before
+        // splitting at the new line breaks. Keep their selection through reflow.
+        for item in &self.items {
+            if let InlineFlowItem::Text { state, .. } = item {
+                if let Ok(mut state) = state.lock() {
+                    state.collapse_fragments();
+                }
+            }
+        }
+
         for fragment in fragments {
             match fragment {
                 PositionedFragment::Text {
@@ -242,7 +338,25 @@ impl Element for InlineFlow {
                             text: source,
                             ..
                         } if source_range == (0..source.len()) => state.clone(),
-                        _ => Arc::new(Mutex::new(InlineState::default())),
+                        InlineFlowItem::Text { state, .. } => {
+                            let mut parent = state.lock().expect("inline state");
+                            let child = Arc::new(Mutex::new(InlineState::default()));
+                            if let Some(selection) = parent.selection {
+                                let start = selection.start.max(source_range.start);
+                                let end = selection.end.min(source_range.end);
+                                if start < end {
+                                    child.lock().expect("inline state").selection = Some(
+                                        (start - source_range.start..end - source_range.start)
+                                            .into(),
+                                    );
+                                }
+                            }
+                            parent
+                                .fragments
+                                .insert((source_range.start, source_range.end), child.clone());
+                            child
+                        }
+                        _ => unreachable!("text fragment must refer to text"),
                     };
                     if let Ok(mut state) = state.lock() {
                         state.set_text(text);
@@ -254,17 +368,55 @@ impl Element for InlineFlow {
                         }
                         _ => Vec::new(),
                     };
-                    let mut element = Inline::new(elements.len(), state, links, highlights)
-                        .reading_style(&self.reading_style, code)
-                        .into_any_element();
-                    element.prepaint_as_root(
-                        bounds.origin + origin,
-                        size(
-                            AvailableSpace::Definite(fragment_size.width),
-                            AvailableSpace::Definite(fragment_size.height),
-                        ),
-                        window,
-                        cx,
+                    let chip_kind = match &self.items[item_ix] {
+                        InlineFlowItem::Text { chip_kind, .. } => *chip_kind,
+                        _ => None,
+                    };
+                    let ChipMetrics {
+                        font_size,
+                        padding_x: pad_x,
+                        padding_y: pad_y,
+                        line_height: text_height,
+                    } = chip_metrics(
+                        chip_kind,
+                        &self.reading_style,
+                        window.text_style().font_size.to_pixels(window.rem_size()),
+                        window.line_height(),
+                    );
+                    let inline = Inline::new(elements.len(), state, links, highlights)
+                        .reading_style(&self.reading_style, code);
+                    let mut element = match chip_kind {
+                        Some(keyboard) => inline.chip(keyboard),
+                        None => inline,
+                    }
+                    .into_any_element();
+                    let mut fragment_style = window.text_style();
+                    fragment_style.font_size = font_size.into();
+                    if chip_kind == Some(ChipKind::Keyboard) {
+                        fragment_style.line_height = text_height.into();
+                    }
+                    window.with_text_style(
+                        Some(gpui::TextStyleRefinement {
+                            font_size: Some(fragment_style.font_size),
+                            line_height: Some(fragment_style.line_height),
+                            // InlineFlow already chose the line breaks. The
+                            // child layout rounds fractional widths at the
+                            // device scale; wrapping again can move its last
+                            // word below the next positioned code fragment.
+                            white_space: Some(WhiteSpace::Nowrap),
+                            ..Default::default()
+                        }),
+                        |window| {
+                            element.prepaint_as_root(
+                                bounds.origin + origin + point(pad_x, pad_y),
+                                size(
+                                    AvailableSpace::Definite(fragment_size.width - pad_x * 2.),
+                                    AvailableSpace::Definite(fragment_size.height - pad_y * 2.),
+                                ),
+                                window,
+                                cx,
+                            );
+                        },
                     );
                     elements.push(element);
                 }
@@ -337,11 +489,20 @@ impl From<&InlineFlowItem> for MeasureItem {
                 links: links.clone(),
                 highlights: highlights.clone(),
                 code_ranges: code_ranges.clone(),
+                chip_kind: match item {
+                    InlineFlowItem::Text { chip_kind, .. } => *chip_kind,
+                    _ => None,
+                },
             },
             InlineFlowItem::Image {
-                url, width, height, ..
+                url,
+                title,
+                width,
+                height,
+                ..
             } => MeasureItem::Image {
                 url: url.clone(),
+                title: title.clone(),
                 width: *width,
                 height: *height,
             },
@@ -366,14 +527,21 @@ fn layout_flow(
     reading_style: &super::TextViewStyle,
     window: &mut Window,
 ) -> InlineFlowLayout {
-    let line_height = window.line_height();
+    let line_height = text_style.line_height_in_pixels(window.rem_size());
     let rem_size = window.rem_size();
     let total_len = items.iter().map(MeasureItem::len).sum::<usize>();
     if total_len == 0 {
         return InlineFlowLayout::default();
     }
 
-    let line_ranges = line_ranges(items, image_sizes, text_style, wrap_width, window);
+    let line_ranges = line_ranges(
+        items,
+        image_sizes,
+        text_style,
+        wrap_width,
+        reading_style,
+        window,
+    );
     let font_size = text_style.font_size.to_pixels(rem_size);
     let mut fragments = Vec::new();
     let mut max_width = Pixels::ZERO;
@@ -401,6 +569,7 @@ fn layout_flow(
                     links,
                     highlights,
                     code_ranges,
+                    chip_kind,
                 } => {
                     let local_start = line_range.start.max(item_start) - item_start;
                     let local_end = line_range.end.min(item_end) - item_start;
@@ -422,8 +591,15 @@ fn layout_flow(
                             reading_style.inline_code_font.as_ref(),
                             reading_style.inline_code_fallbacks.as_ref(),
                         );
-                        let shaped_line = shape_line(subtext.clone(), font_size, &runs, window);
-                        let width = shaped_line.width();
+                        let ChipMetrics {
+                            font_size: chip_size,
+                            padding_x: pad_x,
+                            padding_y: pad_y,
+                            line_height: chip_height,
+                        } = chip_metrics(*chip_kind, reading_style, font_size, line_height);
+                        let shaped_line = shape_line(subtext.clone(), chip_size, &runs, window);
+                        let width = shaped_line.width() + pad_x * 2.;
+                        actual_line_height = actual_line_height.max(chip_height + pad_y * 2.);
                         line_width += width;
                         line_fragments.push(LineFragmentLayout {
                             item_ix,
@@ -432,7 +608,7 @@ fn layout_flow(
                                 links,
                                 highlights,
                             },
-                            size: size(width, line_height),
+                            size: size(width, chip_height + pad_y * 2.),
                             source_range: local_start..local_end,
                         });
                     }
@@ -512,8 +688,27 @@ fn line_ranges(
     image_sizes: &[Option<Size<Pixels>>],
     text_style: &TextStyle,
     wrap_width: Option<Pixels>,
+    reading_style: &super::TextViewStyle,
     window: &mut Window,
 ) -> Vec<Range<usize>> {
+    if items.iter().any(|item| {
+        matches!(
+            item,
+            MeasureItem::Text {
+                chip_kind: Some(ChipKind::Code),
+                ..
+            }
+        )
+    }) {
+        return code_line_ranges(
+            items,
+            image_sizes,
+            text_style,
+            wrap_width,
+            reading_style,
+            window,
+        );
+    }
     let rem_size = window.rem_size();
     let font_size = text_style.font_size.to_pixels(rem_size);
     let mut wrapper = window
@@ -546,6 +741,36 @@ fn line_ranges(
     let (mut start, mut len) = (0, 0);
     for (ix, item) in items.iter().enumerate() {
         match item {
+            MeasureItem::Text {
+                text,
+                chip_kind: Some(keyboard),
+                code_ranges,
+                highlights,
+                ..
+            } => {
+                let ChipMetrics {
+                    font_size: chip_size,
+                    padding_x: padding,
+                    ..
+                } = chip_metrics(
+                    Some(*keyboard),
+                    reading_style,
+                    font_size,
+                    text_style.line_height_in_pixels(window.rem_size()),
+                );
+                let runs = super::inline::styled_runs(
+                    text,
+                    text_style,
+                    highlights,
+                    code_ranges,
+                    reading_style.inline_code_font.as_ref(),
+                    reading_style.inline_code_fallbacks.as_ref(),
+                );
+                let width =
+                    shape_line(text.clone(), chip_size, &runs, window).width() + padding * 2.;
+                fragments.push(WrapLineFragment::element(width, text.len()));
+                len += text.len();
+            }
             MeasureItem::Text { text, .. } => {
                 for part in text.split_inclusive('\n') {
                     let content = part.strip_suffix('\n').unwrap_or(part);
@@ -576,10 +801,179 @@ fn line_ranges(
     ranges
 }
 
+/// Rebuild the first remaining line after every break so a continuing code
+/// span reserves padding exactly once on each painted line. Keyboard keys stay
+/// atomic; code words and oversized words retain their source-byte boundaries.
+fn code_line_ranges(
+    items: &[MeasureItem],
+    image_sizes: &[Option<Size<Pixels>>],
+    text_style: &TextStyle,
+    wrap_width: Option<Pixels>,
+    reading_style: &super::TextViewStyle,
+    window: &mut Window,
+) -> Vec<Range<usize>> {
+    let font_size = text_style.font_size.to_pixels(window.rem_size());
+    let mut wrapper = window
+        .text_system()
+        .line_wrapper(text_style.font(), font_size);
+    let shaped_chips = items
+        .iter()
+        .map(|item| match item {
+            MeasureItem::Text {
+                text,
+                highlights,
+                code_ranges,
+                chip_kind: Some(kind),
+                ..
+            } => {
+                let metrics = chip_metrics(
+                    Some(*kind),
+                    reading_style,
+                    font_size,
+                    text_style.line_height_in_pixels(window.rem_size()),
+                );
+                let runs = super::inline::styled_runs(
+                    text,
+                    text_style,
+                    highlights,
+                    code_ranges,
+                    reading_style.inline_code_font.as_ref(),
+                    reading_style.inline_code_fallbacks.as_ref(),
+                );
+                Some(shape_line(text.clone(), metrics.font_size, &runs, window))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let source = items
+        .iter()
+        .map(|item| match item {
+            MeasureItem::Text { text, .. } => text.as_ref(),
+            MeasureItem::Image { .. } => "\0",
+        })
+        .collect::<String>();
+    let mut ranges = Vec::new();
+    let mut hard_start = 0;
+    for hard_line in source.split_inclusive('\n') {
+        let hard_end = hard_start + hard_line.trim_end_matches('\n').len();
+        let mut start = hard_start;
+        if start == hard_end {
+            ranges.push(start..hard_end);
+        }
+        while start < hard_end {
+            let Some(width) = wrap_width else {
+                ranges.push(start..hard_end);
+                break;
+            };
+            let mut fragments = Vec::new();
+            let mut item_start = 0;
+            for (index, item) in items.iter().enumerate() {
+                let item_end = item_start + item.len();
+                let from = start.max(item_start);
+                let to = hard_end.min(item_end);
+                if from < to {
+                    match item {
+                        MeasureItem::Image { .. } => fragments.push(WrapLineFragment::element(
+                            image_sizes[index].unwrap().width,
+                            IMAGE_LEN,
+                        )),
+                        MeasureItem::Text {
+                            text, chip_kind, ..
+                        } => {
+                            let lo = from - item_start;
+                            let hi = to - item_start;
+                            let part = &text[lo..hi];
+                            if let Some(kind) = chip_kind {
+                                let metrics = chip_metrics(
+                                    Some(*kind),
+                                    reading_style,
+                                    font_size,
+                                    text_style.line_height_in_pixels(window.rem_size()),
+                                );
+                                let shaped =
+                                    shaped_chips[index].as_ref().expect("chip was measured");
+                                if *kind == ChipKind::Keyboard {
+                                    fragments.push(WrapLineFragment::element(
+                                        shaped.x_for_index(hi) - shaped.x_for_index(lo)
+                                            + metrics.padding_x * 2.,
+                                        part.len(),
+                                    ));
+                                } else {
+                                    let mut offset = lo;
+                                    let mut padding = metrics.padding_x * 2.;
+                                    let mut measured = px(0.);
+                                    let mut tokens = 0;
+                                    'words: for word in part.split_inclusive(char::is_whitespace) {
+                                        let end = offset + word.len();
+                                        let word_width =
+                                            shaped.x_for_index(end) - shaped.x_for_index(offset);
+                                        if word_width + metrics.padding_x * 2. > width {
+                                            for (ix, character) in word.char_indices() {
+                                                let ix = offset + ix;
+                                                let glyph_width = shaped
+                                                    .x_for_index(ix + character.len_utf8())
+                                                    - shaped.x_for_index(ix);
+                                                fragments.push(WrapLineFragment::element(
+                                                    glyph_width + padding,
+                                                    character.len_utf8(),
+                                                ));
+                                                measured += glyph_width + padding;
+                                                tokens += 1;
+                                                padding = px(0.);
+                                                if measured > width && tokens > 1 {
+                                                    break 'words;
+                                                }
+                                            }
+                                        } else {
+                                            fragments.push(WrapLineFragment::element(
+                                                word_width + padding,
+                                                word.len(),
+                                            ));
+                                            measured += word_width + padding;
+                                            tokens += 1;
+                                            padding = px(0.);
+                                            if measured > width && tokens > 1 {
+                                                break;
+                                            }
+                                        }
+                                        offset = end;
+                                    }
+                                }
+                            } else {
+                                fragments.push(WrapLineFragment::text(part));
+                            }
+                        }
+                    }
+                }
+                item_start = item_end;
+                // Only the first boundary is consumed below. Avoid scanning
+                // the entire remaining suffix for every line of long code.
+                if wrapper.wrap_line(&fragments, width).next().is_some() {
+                    break;
+                }
+            }
+            let end = wrapper
+                .wrap_line(&fragments, width)
+                .next()
+                .map(|boundary| start + boundary.ix)
+                .unwrap_or(hard_end);
+            if end <= start {
+                ranges.push(start..hard_end);
+                break;
+            }
+            ranges.push(start..end);
+            start = end;
+        }
+        hard_start += hard_line.len();
+    }
+    ranges
+}
+
 #[allow(clippy::too_many_arguments)]
 fn measure_image_size(
     ix: usize,
     url: &SharedUri,
+    title: &str,
     width: Option<DefiniteLength>,
     height: Option<DefiniteLength>,
     line_height: Pixels,
@@ -593,6 +987,28 @@ fn measure_image_size(
     } else {
         intrinsic_image_size(ix, url, width, height, interactions, window, cx)
     };
+    if intrinsic_size.is_none() && width.is_none() && height.is_none() {
+        // Loading/error alt text needs its own width; a square image placeholder
+        // would wrap badge labels one character per line.
+        let alt = if title.is_empty() { "Image" } else { title };
+        let text = SharedString::from(format!("[{alt}] …"));
+        let style = window.text_style();
+        let run = TextRun {
+            len: text.len(),
+            font: style.font(),
+            color: style.color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        return size(
+            window
+                .text_system()
+                .shape_line(text, style.font_size.to_pixels(rem_size), &[run], None)
+                .width,
+            line_height,
+        );
+    }
     image_size(width, height, intrinsic_size, line_height, rem_size)
 }
 
@@ -751,11 +1167,13 @@ mod tests {
                 links: Vec::new(),
                 highlights: Vec::new(),
                 code_ranges: Vec::new(),
+                chip_kind: None,
             };
             let items = vec![
                 text("before\n"),
                 MeasureItem::Image {
                     url: "icon.svg".into(),
+                    title: "icon".into(),
                     width: None,
                     height: None,
                 },
@@ -790,5 +1208,46 @@ mod tests {
                 assert!(texts[2].1 >= texts[1].1 + window.line_height() * 2.);
             }
         });
+    }
+}
+
+struct ChipMetrics {
+    font_size: Pixels,
+    padding_x: Pixels,
+    padding_y: Pixels,
+    line_height: Pixels,
+}
+
+fn chip_metrics(
+    kind: Option<ChipKind>,
+    style: &super::TextViewStyle,
+    font_size: Pixels,
+    line_height: Pixels,
+) -> ChipMetrics {
+    if kind == Some(ChipKind::Keyboard) {
+        if let Some(kbd) = &style.keyboard {
+            return ChipMetrics {
+                font_size: kbd.font_size,
+                padding_x: kbd.padding,
+                padding_y: kbd.padding,
+                line_height: kbd.line_height,
+            };
+        }
+    }
+    if kind.is_some() {
+        if let Some(code) = &style.inline_code {
+            return ChipMetrics {
+                font_size: code.font_size,
+                padding_x: code.padding_x,
+                padding_y: code.padding_y,
+                line_height: line_height * (f32::from(code.font_size) / f32::from(font_size)),
+            };
+        }
+    }
+    ChipMetrics {
+        font_size,
+        padding_x: px(0.),
+        padding_y: px(0.),
+        line_height,
     }
 }

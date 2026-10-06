@@ -3,7 +3,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     ops::Deref,
     sync::{Arc, LazyLock, Mutex},
 };
@@ -13,7 +13,12 @@ use crate::{
     highlighter::{Language, languages},
 };
 
-pub(super) const HIGHLIGHT_NAMES: [&str; 41] = [
+pub(super) const HIGHLIGHT_NAMES: [&str; 47] = [
+    "diff.added",
+    "diff.deleted",
+    "diff.changed",
+    "diff.hunk",
+    "diff.header",
     "attribute",
     "boolean",
     "comment",
@@ -53,6 +58,7 @@ pub(super) const HIGHLIGHT_NAMES: [&str; 41] = [
     "title",
     "type",
     "variable",
+    "variable.builtin",
     "variable.special",
     "variant",
 ];
@@ -92,6 +98,22 @@ impl LanguageConfig {
 /// https://docs.rs/tree-sitter-highlight/0.26.8/tree_sitter_highlight/
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash, JsonSchema, Serialize, Deserialize)]
 pub struct SyntaxColors {
+    /// Exact capture styles, including language-specific subroles such as
+    /// `variable.parameter`. Unspecified captures keep the existing fallback.
+    #[serde(flatten)]
+    pub captures: BTreeMap<String, ThemeStyle>,
+    #[serde(rename = "diff.added")]
+    pub diff_added: Option<ThemeStyle>,
+    #[serde(rename = "diff.deleted")]
+    pub diff_deleted: Option<ThemeStyle>,
+    #[serde(rename = "diff.changed")]
+    pub diff_changed: Option<ThemeStyle>,
+    #[serde(rename = "diff.hunk")]
+    pub diff_hunk: Option<ThemeStyle>,
+    #[serde(rename = "diff.header")]
+    pub diff_header: Option<ThemeStyle>,
+    #[serde(rename = "variable.builtin")]
+    pub variable_builtin: Option<ThemeStyle>,
     pub attribute: Option<ThemeStyle>,
     pub boolean: Option<ThemeStyle>,
     pub comment: Option<ThemeStyle>,
@@ -202,6 +224,8 @@ impl From<FontWeightContent> for FontWeight {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, JsonSchema, Serialize, Deserialize)]
 pub struct ThemeStyle {
+    #[serde(default)]
+    pub background_color: Option<gpui::Hsla>,
     color: Option<Hsla>,
     font_style: Option<FontStyle>,
     font_weight: Option<FontWeightContent>,
@@ -211,9 +235,25 @@ impl From<Hsla> for ThemeStyle {
     fn from(color: Hsla) -> Self {
         Self {
             color: Some(color),
+            background_color: None,
             font_style: None,
             font_weight: None,
         }
+    }
+}
+
+impl ThemeStyle {
+    pub fn background(mut self, color: Option<gpui::Hsla>) -> Self {
+        self.background_color = color;
+        self
+    }
+    pub fn weight(mut self, weight: FontWeightContent) -> Self {
+        self.font_weight = Some(weight);
+        self
+    }
+    pub fn underline(mut self) -> Self {
+        self.font_style = Some(FontStyle::Underline);
+        self
     }
 }
 
@@ -221,6 +261,13 @@ impl From<ThemeStyle> for HighlightStyle {
     fn from(style: ThemeStyle) -> Self {
         HighlightStyle {
             color: style.color,
+            background_color: style.background_color,
+            underline: (style.font_style == Some(FontStyle::Underline)).then_some(
+                gpui::UnderlineStyle {
+                    thickness: gpui::px(1.),
+                    ..Default::default()
+                },
+            ),
             font_weight: style.font_weight.map(Into::into),
             font_style: style.font_style.map(Into::into),
             ..Default::default()
@@ -234,7 +281,16 @@ impl SyntaxColors {
             return None;
         }
 
+        if let Some(style) = self.captures.get(name) {
+            return Some((*style).into());
+        }
+
         let style = match name {
+            "diff.added" => self.diff_added.or(self.string),
+            "diff.deleted" => self.diff_deleted.or(self.keyword),
+            "diff.changed" => self.diff_changed.or(self.property),
+            "diff.hunk" => self.diff_hunk.or(self.attribute),
+            "diff.header" => self.diff_header.or(self.variable),
             "attribute" => self.attribute,
             "boolean" => self.boolean,
             "comment" => self.comment,
@@ -274,6 +330,7 @@ impl SyntaxColors {
             "title" => self.title,
             "type" => self.type_,
             "variable" => self.variable,
+            "variable.builtin" => self.variable_builtin.or(self.variable),
             "variable.special" => self.variable_special,
             "variant" => self.variant,
             _ => None,

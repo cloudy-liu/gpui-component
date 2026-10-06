@@ -544,7 +544,7 @@ impl Language {
             #[cfg(feature = "tree-sitter-diff")]
             Self::Diff => (
                 tree_sitter_diff::LANGUAGE,
-                tree_sitter_diff::HIGHLIGHTS_QUERY,
+                include_str!("languages/diff/highlights.scm"),
                 "",
                 "",
             ),

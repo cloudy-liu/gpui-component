@@ -1,9 +1,8 @@
 use gpui::{
     App, InteractiveElement as _, IntoElement, ListState, ParentElement as _, SharedString,
-    Styled as _, Window, div,
+    Styled as _, Window, canvas, div,
 };
 
-use crate::ElementExt as _;
 use crate::text::node::{BlockNode, NodeContext};
 
 /// The parsed document AST.
@@ -140,11 +139,20 @@ impl ParsedDocument {
                             window,
                             cx,
                         ))
-                        .on_prepaint(move |bounds, _, _| {
-                            if let Ok(mut blocks) = block_bounds.lock() {
-                                blocks.insert(ix, bounds);
-                            }
-                        })
+                        .child(
+                            canvas(
+                                move |bounds, _, _| {
+                                    if let Ok(mut blocks) = block_bounds.lock() {
+                                        blocks.insert(ix, bounds);
+                                    }
+                                },
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full(),
+                        )
                 }));
         };
 
@@ -178,11 +186,20 @@ impl ParsedDocument {
                             window,
                             cx,
                         ))
-                        .on_prepaint(move |bounds, _, _| {
-                            if let Ok(mut blocks) = block_bounds.lock() {
-                                blocks.insert(ix, bounds);
-                            }
-                        })
+                        .child(
+                            canvas(
+                                move |bounds, _, _| {
+                                    if let Ok(mut blocks) = block_bounds.lock() {
+                                        blocks.insert(ix, bounds);
+                                    }
+                                },
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full(),
+                        )
                         .into_any_element()
                 }
             })

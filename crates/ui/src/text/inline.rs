@@ -17,6 +17,12 @@ use crate::{
     text::TextViewMultiClickKind, text::node::LinkMark, text::selection::word_range_at,
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ChipKind {
+    Code,
+    Keyboard,
+}
+
 /// A inline element used to render a inline text and support selectable.
 ///
 /// All text in TextView (including the CodeBlock) used this for text rendering.
@@ -30,20 +36,89 @@ pub(super) struct Inline {
     code_ranges: Vec<Range<usize>>,
     code_font: Option<SharedString>,
     code_fallbacks: Option<gpui::FontFallbacks>,
+    code_background: Option<gpui::Hsla>,
+    code_border: Option<gpui::Hsla>,
+    code_style: Option<super::InlineCodeStyle>,
+    link_underline: super::LinkUnderline,
+    chip_kind: Option<ChipKind>,
+    keyboard: Option<super::KeyboardStyle>,
 
     state: Arc<Mutex<InlineState>>,
 }
 
 /// The inline text state, used RefCell to keep the selection state.
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Default)]
 pub(crate) struct InlineState {
     hovered_index: Option<usize>,
     /// The text that actually rendering, matched with selection.
     pub(super) text: SharedString,
     pub(super) selection: Option<Selection>,
+    pub(super) fragments: std::collections::BTreeMap<(usize, usize), Arc<Mutex<InlineState>>>,
+}
+
+impl PartialEq for InlineState {
+    fn eq(&self, other: &Self) -> bool {
+        self.text == other.text
+            && self.selection == other.selection
+            && self.hovered_index == other.hovered_index
+    }
 }
 
 impl InlineState {
+    pub(super) fn collapse_fragments(&mut self) {
+        if self.fragments.is_empty() {
+            return;
+        }
+        let ranges = self
+            .fragments
+            .iter()
+            .filter_map(|((start, _), state)| {
+                let mut state = state.lock().ok()?;
+                state.collapse_fragments();
+                let selection = state.selection?;
+                Some((start + selection.start, start + selection.end))
+            })
+            .collect::<Vec<_>>();
+        self.selection = ranges
+            .iter()
+            .map(|r| r.0)
+            .min()
+            .zip(ranges.iter().map(|r| r.1).max())
+            .map(|(start, end)| (start..end).into());
+        self.fragments.clear();
+    }
+    pub(super) fn selected_text(&self) -> String {
+        if !self.fragments.is_empty() {
+            return self
+                .fragments
+                .values()
+                .filter_map(|s| s.lock().ok().map(|s| s.selected_text()))
+                .collect();
+        }
+        self.selection
+            .map(|s| self.text[s.start..s.end].to_string())
+            .unwrap_or_default()
+    }
+    pub(super) fn clear_selection(&mut self) {
+        self.selection = None;
+        for state in self.fragments.values() {
+            if let Ok(mut state) = state.lock() {
+                state.clear_selection();
+            }
+        }
+    }
+    pub(super) fn leaves(state: Arc<Mutex<Self>>) -> Vec<Arc<Mutex<Self>>> {
+        let children = state
+            .lock()
+            .map(|s| s.fragments.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        if children.is_empty() {
+            vec![state]
+        } else {
+            children.into_iter().flat_map(Self::leaves).collect()
+        }
+    }
+
     /// Save actually rendered text for selected text to use.
     pub(crate) fn set_text(&mut self, text: SharedString) {
         self.text = text;
@@ -72,6 +147,12 @@ impl Inline {
             code_ranges: Vec::new(),
             code_font: None,
             code_fallbacks: None,
+            code_background: None,
+            code_border: None,
+            code_style: None,
+            link_underline: super::LinkUnderline::Always,
+            chip_kind: None,
+            keyboard: None,
             state,
         }
     }
@@ -82,10 +163,45 @@ impl Inline {
         code_ranges: Vec<Range<usize>>,
     ) -> Self {
         self.hover_color = style.link_hover_color;
+        self.code_style = style.inline_code.clone();
+        self.keyboard = style.keyboard.clone();
+        self.link_underline = style.link_underline;
         self.code_font = style.inline_code_font.clone();
         self.code_fallbacks = style.inline_code_fallbacks.clone();
+        self.code_background = style.inline_code_background;
+        self.code_border = style.inline_code_border;
         self.code_ranges = code_ranges;
         self
+    }
+
+    pub(super) fn chip(mut self, kind: ChipKind) -> Self {
+        self.chip_kind = Some(kind);
+        if kind == ChipKind::Keyboard {
+            if let Some(kbd) = &self.keyboard {
+                self.code_background = Some(kbd.background);
+                self.code_border = Some(kbd.border);
+                self.code_style = Some(super::InlineCodeStyle {
+                    radius: kbd.radius,
+                    padding_x: kbd.padding,
+                    padding_y: kbd.padding,
+                    font_size: kbd.font_size,
+                });
+            }
+        }
+        self
+    }
+    fn chip_text_style(&self, mut style: gpui::TextStyle) -> gpui::TextStyle {
+        if self.chip_kind.is_some() {
+            if let Some(code) = &self.code_style {
+                style.font_size = code.font_size.into();
+            }
+            if self.chip_kind == Some(ChipKind::Keyboard) {
+                if let Some(kbd) = &self.keyboard {
+                    style.line_height = kbd.line_height.into();
+                }
+            }
+        }
+        style
     }
 
     /// Get link at given mouse position.
@@ -162,7 +278,7 @@ impl Inline {
         else {
             return (is_selectable, false, None);
         };
-        let line_height = window.line_height();
+        let line_height = text_layout.line_height();
         let mask_bounds = window.content_mask().bounds;
 
         // Use for debug selection bounds
@@ -259,6 +375,95 @@ impl Inline {
         }
 
         line_bounds
+    }
+
+    /// Boxes for the inline code ranges, when the style asks for rounded,
+    /// bordered chips. Empty otherwise: the run background then does the job.
+    fn code_chips(&self, text_layout: &TextLayout, bounds: &Bounds<Pixels>) -> Vec<CodeChip> {
+        let Some(background) = self.code_background else {
+            return Vec::new();
+        };
+        if self.code_border.is_none() && self.code_style.is_none() {
+            return Vec::new();
+        }
+        let border = self.code_border;
+        let line_height = text_layout.line_height();
+        // The chip is shorter than the line box, so chips on neighbouring
+        // lines do not touch, and a hair wider than the text so the glyphs do
+        // not sit on the border.
+        let inset_y = if self.chip_kind.is_some() {
+            self.code_style
+                .as_ref()
+                .map(|s| -s.padding_y)
+                .unwrap_or(px(0.))
+        } else {
+            line_height * 0.1
+        };
+        let pad_x = self
+            .code_style
+            .as_ref()
+            .map(|s| s.padding_x)
+            .unwrap_or(px(2.));
+        let mut ranges = self.code_ranges.clone();
+        ranges.retain(|range| !range.is_empty());
+        ranges.sort_unstable_by_key(|range| range.start);
+
+        let mut chips = Vec::new();
+        for range in ranges {
+            let (Some(start), Some(end)) = (
+                text_layout.position_for_index(range.start),
+                text_layout.position_for_index(range.end),
+            ) else {
+                continue;
+            };
+            if start.y == end.y {
+                chips.push(CodeChip {
+                    bounds: Bounds::from_corners(
+                        point(start.x - pad_x, start.y + inset_y),
+                        point(end.x + pad_x, start.y + line_height - inset_y),
+                    ),
+                    background,
+                    border,
+                    radius: self.code_style.as_ref().map(|s| s.radius).unwrap_or(px(4.)),
+                });
+                continue;
+            }
+            // Wrapped across lines: fill each line, keep the corners square
+            // and skip the border, as a box would be torn at the wrap.
+            let first = Bounds::from_corners(
+                point(start.x - pad_x, start.y + inset_y),
+                point(bounds.right(), start.y + line_height - inset_y),
+            );
+            chips.push(CodeChip {
+                bounds: first,
+                background,
+                border: None,
+                radius: px(0.),
+            });
+            let mut y = start.y + line_height;
+            while y + line_height <= end.y {
+                chips.push(CodeChip {
+                    bounds: Bounds::from_corners(
+                        point(bounds.left(), y + inset_y),
+                        point(bounds.right(), y + line_height - inset_y),
+                    ),
+                    background,
+                    border: None,
+                    radius: px(0.),
+                });
+                y += line_height;
+            }
+            chips.push(CodeChip {
+                bounds: Bounds::from_corners(
+                    point(bounds.left(), end.y + inset_y),
+                    point(end.x + pad_x, end.y + line_height - inset_y),
+                ),
+                background,
+                border: None,
+                radius: px(0.),
+            });
+        }
+        chips
     }
 
     /// Paint the selection background.
@@ -367,7 +572,7 @@ impl Element for Inline {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let text_style = window.text_style();
+        let text_style = self.chip_text_style(window.text_style());
 
         let hovered = self.state.lock().ok().and_then(|state| state.hovered_index);
         let mut highlights = self.highlights.clone();
@@ -379,6 +584,11 @@ impl Element for Inline {
                         range.clone(),
                         HighlightStyle {
                             color: Some(color),
+                            underline: (self.link_underline == super::LinkUnderline::Hover)
+                                .then_some(gpui::UnderlineStyle {
+                                    thickness: px(1.),
+                                    ..Default::default()
+                                }),
                             ..Default::default()
                         },
                     )],
@@ -396,9 +606,17 @@ impl Element for Inline {
         );
 
         self.styled_text = StyledText::new(self.text.clone()).with_runs(runs);
-        let (layout_id, _) =
-            self.styled_text
-                .request_layout(global_element_id, inspector_id, window, cx);
+        let (layout_id, _) = window.with_text_style(
+            Some(gpui::TextStyleRefinement {
+                font_size: Some(text_style.font_size),
+                line_height: Some(text_style.line_height),
+                ..Default::default()
+            }),
+            |window| {
+                self.styled_text
+                    .request_layout(global_element_id, inspector_id, window, cx)
+            },
+        );
 
         (layout_id, ())
     }
@@ -436,8 +654,31 @@ impl Element for Inline {
         };
 
         let text_layout = self.styled_text.layout().clone();
+        // Chips go behind the text, their border over it.
+        let chips = self.code_chips(&text_layout, &bounds);
+        for chip in &chips {
+            chip.paint_background(window);
+        }
         self.styled_text
             .paint(global_id, None, bounds, &mut (), &mut (), window, cx);
+        for chip in &chips {
+            chip.paint_border(window);
+            if self.chip_kind == Some(ChipKind::Keyboard) {
+                if let Some(kbd) = &self.keyboard {
+                    window.paint_quad(quad(
+                        Bounds::from_corners(
+                            point(chip.bounds.left(), chip.bounds.bottom() - px(2.)),
+                            point(chip.bounds.right(), chip.bounds.bottom() - px(1.)),
+                        ),
+                        px(0.),
+                        kbd.shadow,
+                        Edges::default(),
+                        gpui::transparent_black(),
+                        BorderStyle::default(),
+                    ));
+                }
+            }
+        }
 
         // layout selections
         // The state is already locked for this paint. Pass its selection so
@@ -588,6 +829,46 @@ impl Element for Inline {
                 }
             });
         }
+    }
+}
+
+/// One inline code box. `border: Some` means the whole chip fits on a line and
+/// is drawn rounded with an outline; `None` is a square fill for a wrapped part.
+struct CodeChip {
+    bounds: Bounds<Pixels>,
+    background: gpui::Hsla,
+    border: Option<gpui::Hsla>,
+    radius: Pixels,
+}
+
+impl CodeChip {
+    fn radius(&self) -> Pixels {
+        self.radius
+    }
+
+    fn paint_background(&self, window: &mut Window) {
+        window.paint_quad(quad(
+            self.bounds,
+            self.radius(),
+            self.background,
+            Edges::default(),
+            gpui::transparent_black(),
+            BorderStyle::default(),
+        ));
+    }
+
+    fn paint_border(&self, window: &mut Window) {
+        let Some(border) = self.border else {
+            return;
+        };
+        window.paint_quad(quad(
+            self.bounds,
+            self.radius(),
+            gpui::transparent_black(),
+            Edges::all(px(1.)),
+            border,
+            BorderStyle::default(),
+        ));
     }
 }
 

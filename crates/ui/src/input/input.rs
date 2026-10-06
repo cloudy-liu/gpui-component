@@ -1,4 +1,5 @@
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -17,6 +18,40 @@ use crate::{Selectable, StyledExt, h_flex};
 use crate::{Sizable, StyleSized};
 
 use super::{InputState, element::EditorScrollbar};
+
+/// Colors for one code editor, including its independently chosen appearance.
+/// Editors without an override continue to use the application theme.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+pub struct CodeEditorStyle {
+    pub highlight_theme: Arc<crate::highlighter::HighlightTheme>,
+    pub selection: Hsla,
+    pub caret: Hsla,
+    pub search_match: Hsla,
+    pub search_match_active: Hsla,
+    pub muted_foreground: Hsla,
+    pub border: Hsla,
+}
+
+impl CodeEditorStyle {
+    pub fn from_theme(theme: &crate::Theme) -> Self {
+        Self {
+            highlight_theme: theme.highlight_theme.clone(),
+            selection: theme.selection,
+            caret: theme.caret,
+            search_match: theme.selection.saturation(0.1),
+            search_match_active: theme.selection,
+            muted_foreground: theme.muted_foreground,
+            border: theme.border,
+        }
+    }
+
+    pub(super) fn background(&self, cx: &App) -> Hsla {
+        self.highlight_theme
+            .style
+            .editor_background
+            .unwrap_or(cx.theme().editor_background())
+    }
+}
 
 /// Returns `(background, foreground)` colors for input-like components.
 pub(crate) fn input_style(disabled: bool, cx: &App) -> (Hsla, Hsla) {
@@ -47,6 +82,7 @@ pub struct Input {
     focus_bordered: bool,
     tab_index: isize,
     selected: bool,
+    editor_style: Option<Arc<CodeEditorStyle>>,
 
     /// An optional context menu builder to allow a custom context menu on the input.
     ///
@@ -90,12 +126,20 @@ impl Input {
             focus_bordered: true,
             tab_index: 0,
             selected: false,
+            editor_style: None,
             context_menu_builder: None,
         }
     }
 
     pub fn prefix(mut self, prefix: impl IntoElement) -> Self {
         self.prefix = Some(prefix.into_any_element());
+        self
+    }
+
+    /// Override this code editor's colors without changing the application theme.
+    /// The editor background is painted even when `appearance(false)` is used.
+    pub fn editor_style(mut self, style: Arc<CodeEditorStyle>) -> Self {
+        self.editor_style = Some(style);
         self
     }
 
@@ -246,7 +290,15 @@ impl RenderOnce for Input {
         const LINE_HEIGHT: Rems = Rems(1.25);
         let text_align = self.style.text.text_align.unwrap_or(TextAlign::Left);
 
-        self.state.update(cx, |state, _| {
+        self.state.update(cx, |state, cx| {
+            let editor_style = self
+                .editor_style
+                .clone()
+                .filter(|_| state.mode.is_code_editor());
+            if state.editor_style != editor_style {
+                state.editor_style = editor_style;
+                cx.notify();
+            }
             state.context_menu_builder = self.context_menu_builder.clone();
             state.disabled = self.disabled;
             state.size = self.size;
@@ -399,6 +451,16 @@ impl RenderOnce for Input {
             .items_center()
             .gap(gap_x)
             .refine_style(&self.style)
+            .when_some(state.editor_style.as_ref(), |this, style| {
+                let bg = style.background(cx);
+                let fg = style
+                    .highlight_theme
+                    .style
+                    .editor_foreground
+                    .unwrap_or(cx.theme().foreground);
+                this.bg(if state.disabled { bg.opacity(0.5) } else { bg })
+                    .text_color(fg)
+            })
             .children(prefix.map(|p| {
                 div()
                     .when(state.disabled, |this| this.opacity(0.5))
@@ -438,5 +500,90 @@ impl RenderOnce for Input {
                         .children(suffix),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{AppContext as _, Context, Render, TestAppContext};
+    use std::sync::Arc;
+
+    struct Editors {
+        local: Entity<InputState>,
+        ordinary: Entity<InputState>,
+        style: Arc<super::CodeEditorStyle>,
+    }
+
+    impl Render for Editors {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            h_flex()
+                .size_full()
+                .child(
+                    Input::new(&self.local)
+                        .appearance(false)
+                        .editor_style(self.style.clone()),
+                )
+                .child(Input::new(&self.ordinary))
+        }
+    }
+
+    #[gpui::test]
+    fn test_editor_style_builder_is_local_and_updates_without_replacing_text(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::init);
+        let (root, vcx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| Editors {
+                local: cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .code_editor("json")
+                        .default_value("123")
+                }),
+                ordinary: cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .code_editor("json")
+                        .default_value("456")
+                }),
+                style: Arc::new(super::CodeEditorStyle::from_theme(cx.theme())),
+            });
+            crate::Root::new(view, window, cx)
+        });
+        let view = root.read_with(vcx, |root, _| {
+            root.view().clone().downcast::<Editors>().unwrap()
+        });
+        let (local, ordinary) =
+            view.read_with(vcx, |view, _| (view.local.clone(), view.ordinary.clone()));
+        for color in [0xaa1122, 0x2233ee] {
+            view.update(vcx, |view, cx| {
+                let mut style = (*view.style).clone();
+                let highlight = Arc::make_mut(&mut style.highlight_theme);
+                highlight.style.syntax.number = Some(gpui::Hsla::from(gpui::rgb(color)).into());
+                view.style = Arc::new(style);
+                cx.notify();
+            });
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            local.read_with(vcx, |input, cx| {
+                assert_eq!(input.value(), "123");
+                assert!(input.last_layout.is_some(), "the input must actually draw");
+                let style = input.resolved_editor_style(cx);
+                let mut highlighter = crate::highlighter::SyntaxHighlighter::new("json");
+                highlighter.update(None, input.text(), None);
+                let runs = highlighter.styles(&(0..3), &style.highlight_theme);
+                assert!(
+                    runs.iter()
+                        .any(|(_, run)| run.color == Some(gpui::rgb(color).into()))
+                );
+            });
+            ordinary.read_with(vcx, |input, cx| {
+                assert_eq!(input.value(), "456");
+                assert_eq!(
+                    input.resolved_editor_style(cx).highlight_theme,
+                    cx.theme().highlight_theme
+                );
+            });
+        }
     }
 }

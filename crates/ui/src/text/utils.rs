@@ -59,3 +59,36 @@ mod tests {
         assert_eq!(list_item_prefix(0, false, 4), "⁃ ");
     }
 }
+
+/// CSS list-style-type sequences used by GitHub, including fourth-level decimal.
+pub(super) fn github_list_item_prefix(ix: usize, ordered: bool, depth: usize) -> String {
+    if !ordered {
+        return format!("{} ", BULLETS[depth.min(2)]);
+    }
+    if depth % 3 != 1 {
+        return list_item_prefix(ix, true, depth % 3);
+    }
+    let mut number = ix + 1;
+    let mut numeral = String::new();
+    for (value, token) in [
+        (1000, "m"),
+        (900, "cm"),
+        (500, "d"),
+        (400, "cd"),
+        (100, "c"),
+        (90, "xc"),
+        (50, "l"),
+        (40, "xl"),
+        (10, "x"),
+        (9, "ix"),
+        (5, "v"),
+        (4, "iv"),
+        (1, "i"),
+    ] {
+        while number >= value {
+            numeral.push_str(token);
+            number -= value;
+        }
+    }
+    format!("{numeral}. ")
+}

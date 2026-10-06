@@ -16,9 +16,9 @@ use std::{ops::Range, rc::Rc};
 
 use crate::{
     ActiveTheme as _, Colorize, IconName, Root, Selectable, Sizable as _,
-    button::{Button, ButtonVariants as _},
+    button::{Button, ButtonCustomVariant, ButtonVariants as _},
     input::{RopeExt as _, blink_cursor::CURSOR_WIDTH, display_map::LineLayout},
-    scroll::Scrollbar,
+    scroll::{Scrollbar, ScrollbarColors},
 };
 
 use super::{InputState, LastLayout, WhitespaceIndicators, mode::InputMode};
@@ -165,8 +165,16 @@ impl Element for EditorScrollbar {
         } else {
             Scrollbar::vertical(&scroll_handle)
         }
-        .scroll_size(snapshot.layout.scroll_size)
-        .into_any_element();
+        .scroll_size(snapshot.layout.scroll_size);
+        if let Some(style) = &state.editor_style {
+            scrollbar = scrollbar.colors(ScrollbarColors {
+                thumb: style.muted_foreground.opacity(0.5).into(),
+                thumb_hover: style.muted_foreground.opacity(0.8).into(),
+                track: style.background(cx),
+                border: style.border,
+            });
+        }
+        let mut scrollbar = scrollbar.into_any_element();
 
         scrollbar.prepaint_as_root(
             snapshot.layout.bounds.origin,
@@ -282,13 +290,18 @@ struct FoldIconLayout {
 pub(super) struct TextElement {
     pub(crate) state: Entity<InputState>,
     placeholder: SharedString,
+    editor_style: std::sync::Arc<super::CodeEditorStyle>,
 }
 
 impl TextElement {
-    pub(super) fn new(state: Entity<InputState>) -> Self {
+    pub(super) fn new(
+        state: Entity<InputState>,
+        editor_style: std::sync::Arc<super::CodeEditorStyle>,
+    ) -> Self {
         Self {
             state,
             placeholder: SharedString::default(),
+            editor_style,
         }
     }
 
@@ -942,12 +955,12 @@ impl TextElement {
             return None;
         }
 
-        let invisible_color = cx
-            .theme()
+        let editor_style = state.resolved_editor_style(cx);
+        let invisible_color = editor_style
             .highlight_theme
             .style
             .editor_invisible
-            .unwrap_or(cx.theme().muted_foreground);
+            .unwrap_or(editor_style.muted_foreground);
 
         let space_font_size = text_size.half();
         let tab_font_size = text_size;
@@ -1015,7 +1028,10 @@ impl TextElement {
         }
 
         let completion_text = &completion_item.insert_text;
-        let completion_color = cx.theme().muted_foreground.opacity(0.5);
+        let completion_color = state
+            .resolved_editor_style(cx)
+            .muted_foreground
+            .opacity(0.5);
 
         let text_style = window.text_style();
         let font = text_style.font();
@@ -1155,8 +1171,16 @@ impl TextElement {
             );
 
             // Create and prepaint icon
-            let mut icon = Button::new(("fold", ix))
-                .ghost()
+            let mut icon = Button::new(("fold", ix)).ghost();
+            if let Some(style) = &self.state.read(cx).editor_style {
+                icon = icon.custom(
+                    ButtonCustomVariant::new(cx)
+                        .foreground(style.muted_foreground)
+                        .hover(style.selection)
+                        .active(style.selection),
+                );
+            }
+            let mut icon = icon
                 .icon(if info.is_folded {
                     IconName::ChevronRight
                 } else {
@@ -1356,7 +1380,7 @@ impl TextElement {
             let range_styles = if skip {
                 vec![(byte_start..byte_end, HighlightStyle::default())]
             } else {
-                highlighter.styles(&(byte_start..byte_end), &cx.theme().highlight_theme)
+                highlighter.styles(&(byte_start..byte_end), &self.editor_style.highlight_theme)
             };
 
             styles.extend(range_styles);
@@ -1395,7 +1419,11 @@ impl TextElement {
             flush_range(start_line, line, false, &mut styles);
         }
 
-        let diagnostic_styles = diagnostics.styles_for_range(&visible_byte_range, cx);
+        let diagnostic_styles = diagnostics.styles_for_range(
+            &visible_byte_range,
+            &self.editor_style.highlight_theme,
+            cx,
+        );
 
         // Range semantic tokens, resolved from the LSP provider's cached
         // result through the active highlight theme so it shares the same
@@ -1404,7 +1432,7 @@ impl TextElement {
         let custom_styles = state.lsp.semantic_tokens_for_range(
             text,
             &visible_byte_range,
-            &cx.theme().highlight_theme,
+            &self.editor_style.highlight_theme,
         );
 
         // hover definition style
@@ -1591,7 +1619,7 @@ impl Element for TextElement {
         let (display_text, text_color) = if is_empty {
             (
                 &Rope::from(placeholder.as_str()),
-                dim(cx.theme().muted_foreground),
+                dim(self.editor_style.muted_foreground),
             )
         } else if state.masked {
             (
@@ -1857,7 +1885,11 @@ impl Element for TextElement {
             let other_line_runs = vec![TextRun {
                 len: line_number_len,
                 font: style.font(),
-                color: cx.theme().muted_foreground,
+                color: state
+                    .editor_style
+                    .as_ref()
+                    .and_then(|s| s.highlight_theme.style.editor_line_number)
+                    .unwrap_or(cx.theme().muted_foreground),
                 background_color: None,
                 underline: None,
                 strikethrough: None,
@@ -1865,7 +1897,11 @@ impl Element for TextElement {
             let current_line_runs = vec![TextRun {
                 len: line_number_len,
                 font: style.font(),
-                color: cx.theme().foreground,
+                color: state
+                    .editor_style
+                    .as_ref()
+                    .and_then(|s| s.highlight_theme.style.editor_active_line_number)
+                    .unwrap_or(cx.theme().foreground),
                 background_color: None,
                 underline: None,
                 strikethrough: None,
@@ -1996,16 +2032,16 @@ impl Element for TextElement {
         let origin = bounds.origin;
 
         let invisible_top_padding = prepaint.last_layout.visible_top;
-        let active_line_color = cx
-            .theme()
+        let active_line_color = self
+            .editor_style
             .highlight_theme
             .style
             .editor_active_line
             .map(|color| if disabled { color.opacity(0.5) } else { color });
         let editor_background = if disabled {
-            cx.theme().editor_background().opacity(0.5)
+            self.editor_style.background(cx).opacity(0.5)
         } else {
-            cx.theme().editor_background()
+            self.editor_style.background(cx)
         };
 
         // Paint active line
@@ -2055,22 +2091,22 @@ impl Element for TextElement {
         let cursor_row_y = window.with_content_mask(Some(content_mask), |window| {
             // Paint indent guides
             if let Some(path) = prepaint.indent_guides_path.take() {
-                window.paint_path(path, cx.theme().border.opacity(0.85));
+                window.paint_path(path, self.editor_style.border.opacity(0.85));
             }
 
             // Paint selections
             if window.is_window_active() {
-                let secondary_selection = cx.theme().selection.saturation(0.1);
+                let secondary_selection = self.editor_style.selection.saturation(0.1);
                 for (path, is_active) in prepaint.search_match_paths.iter() {
-                    window.paint_path(path.clone(), secondary_selection);
+                    window.paint_path(path.clone(), self.editor_style.search_match);
 
                     if *is_active {
-                        window.paint_path(path.clone(), cx.theme().selection);
+                        window.paint_path(path.clone(), self.editor_style.search_match_active);
                     }
                 }
 
                 if let Some(path) = prepaint.selection_path.take() {
-                    window.paint_path(path, cx.theme().selection);
+                    window.paint_path(path, self.editor_style.selection);
                 }
 
                 // Paint hover highlight
@@ -2166,7 +2202,7 @@ impl Element for TextElement {
             // Paint blinking cursor
             if focused && show_cursor {
                 if let Some(cursor_bounds) = prepaint.cursor_bounds_with_scroll() {
-                    window.paint_quad(fill(cursor_bounds, cx.theme().caret));
+                    window.paint_quad(fill(cursor_bounds, self.editor_style.caret));
                 }
             }
 
@@ -2181,12 +2217,12 @@ impl Element for TextElement {
             // Gutter background: prefer the dedicated `editor.gutter.background`
             // theme key, falling back to the editor background so existing
             // themes render unchanged.
-            let gutter_bg = cx
-                .theme()
+            let gutter_bg = self
+                .editor_style
                 .highlight_theme
                 .style
                 .editor_gutter_background
-                .unwrap_or_else(|| cx.theme().editor_background());
+                .unwrap_or_else(|| self.editor_style.background(cx));
             window.paint_quad(fill(
                 Bounds {
                     origin: input_bounds.origin,

@@ -195,6 +195,19 @@ impl TextView {
         self
     }
 
+    /// Add owner-supplied controls above an image without changing its layout
+    /// or its resource-loading policy. Returning None leaves ordinary images alone.
+    pub fn image_actions<F, E>(mut self, actions: F) -> Self
+    where
+        F: Fn(&gpui::SharedUri, &mut Window, &mut App) -> Option<E> + Send + Sync + 'static,
+        E: IntoElement,
+    {
+        self.interactions.image_actions = Some(Arc::new(move |url, window, cx| {
+            actions(url, window, cx).map(IntoElement::into_any_element)
+        }));
+        self
+    }
+
     /// Replace the Markdown extension registry.
     pub fn markdown_extensions(mut self, extensions: MarkdownExtensions) -> Self {
         self.markdown_extensions = Arc::new(extensions);
@@ -316,7 +329,13 @@ impl Element for TextView {
             state.set_markdown_extensions(self.markdown_extensions.clone(), cx);
             state.selectable = self.selectable;
             state.scrollable = self.scrollable;
-            state.text_view_style = self.text_view_style.clone();
+            if state.text_view_style != self.text_view_style {
+                let selection = state.selection_snapshot();
+                state.text_view_style = self.text_view_style.clone();
+                if let Some(selection) = selection {
+                    state.restore_selection(selection, cx);
+                }
+            }
 
             if let Some(text) = self.text.clone() {
                 state.set_text(text.as_str(), cx);
@@ -487,12 +506,93 @@ mod tests {
             "text before and after an inline image should share a rendered line"
         );
         assert!(
-            inline_bounds[1].left() - inline_bounds[0].right() > px(8.),
-            "inline image should reserve horizontal space in the text layout"
+            inline_bounds[1].left() - inline_bounds[0].right() > inline_bounds[0].size.width,
+            "the unloaded label '[inline image] …' needs more room than 'Build Status '"
         );
+    }
+
+    struct AnimatedImageRoot {
+        image: std::sync::Arc<gpui::RenderImage>,
+        after_left: std::sync::Arc<std::sync::Mutex<f32>>,
+    }
+
+    impl Render for AnimatedImageRoot {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let image = self.image.clone();
+            let interactions = super::super::interaction::TextViewInteractions {
+                image_source: Some(std::sync::Arc::new(move |_, _, _| {
+                    crate::text::TextViewImageSource::Ready(image.clone().into())
+                })),
+                ..Default::default()
+            };
+            let after_left = self.after_left.clone();
+            div()
+                .flex()
+                .w(px(420.))
+                .child(interactions.image(
+                    0,
+                    &"test.gif".into(),
+                    &None,
+                    "animated",
+                    None,
+                    None,
+                    window,
+                    cx,
+                ))
+                .child(
+                    gpui::canvas(
+                        move |bounds, _, _| {
+                            *after_left.lock().unwrap() = f32::from(bounds.left());
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .w(px(8.))
+                    .h(px(8.)),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn visible_markdown_image_advances_animation_frames(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let after_left = std::sync::Arc::new(std::sync::Mutex::new(0.));
+        let position = after_left.clone();
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let content = cx.new(|_| AnimatedImageRoot {
+                after_left: position,
+                image: std::sync::Arc::new(gpui::RenderImage::new(smallvec::smallvec![
+                    image::Frame::from_parts(
+                        image::RgbaImage::new(8, 8),
+                        0,
+                        0,
+                        image::Delay::from_numer_denom_ms(20, 1)
+                    ),
+                    image::Frame::from_parts(
+                        image::RgbaImage::new(80, 8),
+                        0,
+                        0,
+                        image::Delay::from_numer_denom_ms(10_000, 1)
+                    ),
+                ])),
+            });
+            crate::Root::new(content, window, cx)
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let draw = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                assert!(window.is_window_active());
+                window.refresh();
+                let _ = window.draw(cx);
+                *after_left.lock().unwrap()
+            })
+        };
+        let first = draw(cx);
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        let second = draw(cx);
         assert!(
-            inline_bounds[1].left() - inline_bounds[0].right() < px(40.),
-            "unloaded inline image fallback should stay generic and compact"
+            second > first + 60.,
+            "visible image stayed on frame zero: {first}, {second}"
         );
     }
 
