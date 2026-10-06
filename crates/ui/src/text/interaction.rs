@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, DefiniteLength, ImageSource, InteractiveElement as _, IntoElement, ObjectFit,
-    ParentElement as _, SharedString, SharedUri, StatefulInteractiveElement as _, Styled as _,
-    StyledImage as _, Window, div, img, prelude::FluentBuilder as _, relative,
+    AnyElement, App, AvailableSpace, DefiniteLength, ImageSource, InteractiveElement as _,
+    IntoElement, ObjectFit, ParentElement as _, SharedString, SharedUri,
+    StatefulInteractiveElement as _, Styled as _, StyledImage as _, Window, div, img,
+    prelude::FluentBuilder as _, relative,
 };
 
 use crate::{WindowExt as _, tooltip::Tooltip};
@@ -70,7 +71,19 @@ impl TextViewInteractions {
         } else {
             title.to_owned().into()
         };
-        let content = match self.image_source(url, window, cx) {
+        let source = self.image_source(url, window, cx);
+        let responsive_ratio = match &source {
+            TextViewImageSource::Ready(source)
+                if matches!(width, Some(DefiniteLength::Fraction(_))) && height.is_none() =>
+            {
+                let mut probe = img(source.clone()).into_any_element();
+                let size = probe.layout_as_root(AvailableSpace::min_size(), window, cx);
+                (size.width > gpui::Pixels::ZERO && size.height > gpui::Pixels::ZERO)
+                    .then(|| size.width / size.height)
+            }
+            _ => None,
+        };
+        let content = match source {
             TextViewImageSource::Ready(source) => {
                 let failed = alt.clone();
                 let loading = alt.clone();
@@ -80,6 +93,9 @@ impl TextViewInteractions {
                     .max_w(relative(1.))
                     .when_some(width, |this, width| this.w(width))
                     .when_some(height, |this, height| this.h(height))
+                    .when(responsive_ratio.is_some(), |this| {
+                        this.absolute().top_0().left_0().size_full()
+                    })
                     .with_loading(move || {
                         div()
                             .whitespace_nowrap()
@@ -110,6 +126,11 @@ impl TextViewInteractions {
             .id(("image", ix))
             .relative()
             .max_w(relative(1.))
+            // Resolve percentage width on the wrapper before fitting the image;
+            // GPUI's auto image height otherwise retains intrinsic pixel height.
+            .when_some(responsive_ratio, |this, ratio| {
+                this.w(width.unwrap()).aspect_ratio(ratio)
+            })
             .child(content)
             .when_some(
                 self.image_actions

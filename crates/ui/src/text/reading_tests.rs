@@ -256,6 +256,66 @@ struct ReadingRoot {
     images: Arc<Mutex<Vec<String>>>,
 }
 
+struct PercentageImageRoot {
+    text: Entity<TextViewState>,
+    image: Arc<gpui::RenderImage>,
+    width: f32,
+}
+
+impl Render for PercentageImageRoot {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let image = self.image.clone();
+        div().w(px(self.width)).child(
+            TextView::new(&self.text)
+                .image_source(move |_, _, _| TextViewImageSource::Ready(image.clone().into())),
+        )
+    }
+}
+
+#[gpui::test]
+fn percentage_readme_image_reserves_its_scaled_height(cx: &mut TestAppContext) {
+    cx.update(crate::init);
+    for percentage in [100., 50.] {
+        let source = format!(
+            "<div align=\"center\"><img src=\"hero.webp\" width=\"{percentage}%\" /></div>\n\n<br/>\n\n## After"
+        );
+        let (root, vcx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| PercentageImageRoot {
+                text: cx.new(|cx| TextViewState::markdown(&source, cx)),
+                image: Arc::new(gpui::RenderImage::new(smallvec::smallvec![
+                    image::Frame::new(image::RgbaImage::new(1000, 500))
+                ])),
+                width: 400.,
+            });
+            crate::Root::new(view, window, cx)
+        });
+        let view = root.read_with(vcx, |root, _| {
+            root.view()
+                .clone()
+                .downcast::<PercentageImageRoot>()
+                .unwrap()
+        });
+        for width in [400., 600.] {
+            view.update(vcx, |view, cx| {
+                view.width = width;
+                cx.notify();
+            });
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let after = view.read_with(vcx, |view, cx| {
+                view.text.read(cx).anchor_bounds("after").unwrap().top()
+            });
+            let scaled_height = width * percentage / 100. / 2.;
+            assert!(
+                (scaled_height..scaled_height + 100.).contains(&f32::from(after)),
+                "incorrect image height at width {width}, {percentage}%: heading starts at {after:?}"
+            );
+        }
+    }
+}
+
 #[gpui::test]
 fn heading_code_metrics_reflow_without_losing_selection(cx: &mut TestAppContext) {
     cx.update(crate::init);
