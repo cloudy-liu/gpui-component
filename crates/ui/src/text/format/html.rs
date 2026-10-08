@@ -253,9 +253,10 @@ fn parse_table_cell(
     attrs: &RefCell<Vec<html5ever::Attribute>>,
 ) {
     let mut paragraph = Paragraph::default();
-    for child in node.children.borrow().iter() {
-        parse_paragraph(&mut paragraph, child);
-    }
+    parse_paragraph(&mut paragraph, node);
+    let header =
+        matches!(&node.data, NodeData::Element { name, .. } if name.local == local_name!("th"));
+    paragraph.alignment = alignment(attrs).or_else(|| header.then_some(gpui::TextAlign::Center));
     let width = attr_width_height(attrs).0;
     let table_cell = node::TableCell {
         children: paragraph,
@@ -357,7 +358,7 @@ fn parse_paragraph(paragraph: &mut Paragraph, node: &Rc<Node>) {
             local_name!("em") | local_name!("i") => {
                 merge_children_with_mark(node, paragraph, Some(TextMark::default().italic()));
             }
-            local_name!("strong") | local_name!("b") => {
+            local_name!("strong") | local_name!("b") | local_name!("th") => {
                 merge_children_with_mark(node, paragraph, Some(TextMark::default().bold()));
             }
             local_name!("del") | local_name!("s") => {
@@ -648,14 +649,21 @@ fn parse_node(
                 consume_paragraph(&mut children, paragraph);
 
                 let mut table = Table::default();
+                table.wrap = style_attrs(attrs)
+                    .get("white-space")
+                    .is_some_and(|value| value.trim() == "normal");
                 for child in node.children.borrow().iter() {
                     match child.data {
                         NodeData::Element { ref name, .. }
                             if name.local == local_name!("tbody")
                                 || name.local == local_name!("thead") =>
                         {
+                            let start = table.children.len();
                             for sub_child in child.children.borrow().iter() {
                                 parse_table_row(&mut table, &sub_child);
+                            }
+                            if name.local == local_name!("thead") {
+                                table.header_rows += table.children.len() - start;
                             }
                         }
                         _ => {
@@ -775,6 +783,55 @@ mod tests {
     };
 
     use super::trim_text;
+
+    #[test]
+    fn test_metadata_row_headers_are_bold_and_centered() {
+        let mut cx = NodeContext::default();
+        let document = super::parse(
+            "<table style=\"white-space: normal\"><tr><th>name</th><td>show-me</td></tr><tr><th>description</th><td>Show a diagram.</td></tr></table>",
+            &mut cx,
+        ).unwrap();
+        let BlockNode::Table(table) = &document.blocks[0] else {
+            panic!("expected table");
+        };
+        assert!(table.wrap);
+        assert_eq!(table.header_rows, 0);
+        assert!(!table.striped(0));
+        assert!(table.striped(1));
+        for row in &table.children {
+            let header = &row.children[0].children;
+            assert_eq!(header.alignment, Some(gpui::TextAlign::Center));
+            assert!(
+                header
+                    .children
+                    .iter()
+                    .all(|node| node.marks.iter().all(|(_, mark)| mark.bold))
+            );
+            assert_eq!(row.children[1].children.alignment, None);
+        }
+    }
+
+    #[test]
+    fn test_column_headers_do_not_shift_body_stripes_or_override_alignment() {
+        let mut cx = NodeContext::default();
+        let document = super::parse(
+            "<table><thead><tr><th align=\"left\">Key</th></tr></thead><tbody><tr><td>one</td></tr><tr><td>two</td></tr><tr><td>three</td></tr></tbody></table>",
+            &mut cx,
+        ).unwrap();
+        let BlockNode::Table(table) = &document.blocks[0] else {
+            panic!("expected table");
+        };
+        assert!(!table.wrap);
+        assert_eq!(table.header_rows, 1);
+        assert_eq!(
+            table.children[0].children[0].children.alignment,
+            Some(gpui::TextAlign::Left)
+        );
+        assert!(!table.striped(0));
+        assert!(!table.striped(1));
+        assert!(table.striped(2));
+        assert!(!table.striped(3));
+    }
 
     #[test]
     fn test_cleanup_html() {

@@ -543,11 +543,17 @@ pub(crate) struct Table {
     pub(crate) children: Vec<TableRow>,
     pub(crate) column_aligns: Vec<ColumnumnAlign>,
     pub(crate) span: Option<Span>,
+    pub(crate) header_rows: usize,
+    pub(crate) wrap: bool,
 }
 
 impl Table {
     pub(crate) fn column_align(&self, index: usize) -> ColumnumnAlign {
         self.column_aligns.get(index).copied().unwrap_or_default()
+    }
+
+    pub(crate) fn striped(&self, row: usize) -> bool {
+        row >= self.header_rows && (row - self.header_rows) % 2 == 1
     }
 }
 
@@ -1635,7 +1641,7 @@ impl BlockNode {
         }
 
         // Scroll mode is opted in via `style.table` overflow-x: scroll.
-        if matches!(node_cx.style.table.overflow.x, Some(Overflow::Scroll)) {
+        if !table.wrap && matches!(node_cx.style.table.overflow.x, Some(Overflow::Scroll)) {
             Self::render_scroll_table(table, col_lens.len(), options, node_cx, window, cx)
         } else {
             Self::render_wrap_table(table, &col_lens, options, node_cx, window, cx)
@@ -1759,14 +1765,16 @@ impl BlockNode {
                             )
                         })
                         .refine_style(&style.table_cell)
-                        .when(row_ix == 0, |this| this.refine_style(&style.table_header))
+                        .when(row_ix < table.header_rows, |this| {
+                            this.refine_style(&style.table_header)
+                        })
                         .child(cell.children.render(node_cx, window, cx)),
                 );
             }
             rows.push(
                 div()
                     .id(("row", row_ix))
-                    .when(row_ix > 0 && row_ix % 2 == 0, |this| {
+                    .when(table.striped(row_ix), |this| {
                         this.when_some(style.table_stripe, |this, color| this.bg(color))
                     })
                     .when_some(style.table_hover_background, |this, color| {
@@ -1845,6 +1853,8 @@ impl BlockNode {
                 cells.push(
                     div()
                         .id(("cell", ix))
+                        .flex()
+                        .items_center()
                         .overflow_hidden()
                         .when(align == ColumnumnAlign::Center, |this| this.text_center())
                         .when(align == ColumnumnAlign::Right, |this| this.text_right())
@@ -1858,7 +1868,9 @@ impl BlockNode {
                             )
                         })
                         .refine_style(&style.table_cell)
-                        .when(row_ix == 0, |this| this.refine_style(&style.table_header))
+                        .when(row_ix < table.header_rows, |this| {
+                            this.refine_style(&style.table_header)
+                        })
                         .child(cell.children.render(node_cx, window, cx)),
                 );
             }
@@ -1866,7 +1878,7 @@ impl BlockNode {
             rows.push(
                 div()
                     .id(("row", row_ix))
-                    .when(row_ix > 0 && row_ix % 2 == 0, |this| {
+                    .when(table.striped(row_ix), |this| {
                         this.when_some(style.table_stripe, |this, color| this.bg(color))
                     })
                     .when_some(style.table_hover_background, |this, color| {

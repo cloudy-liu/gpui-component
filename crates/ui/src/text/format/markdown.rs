@@ -575,6 +575,7 @@ fn ast_to_node(
                 }
             });
             table.span = new_span(val.position, cx);
+            table.header_rows = 1;
 
             BlockNode::Table(table)
         }
