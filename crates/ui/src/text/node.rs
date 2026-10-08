@@ -1871,7 +1871,12 @@ impl BlockNode {
                         .when(row_ix < table.header_rows, |this| {
                             this.refine_style(&style.table_header)
                         })
-                        .child(cell.children.render(node_cx, window, cx)),
+                        .child(
+                            div()
+                                .w_full()
+                                .whitespace_normal()
+                                .child(cell.children.render(node_cx, window, cx)),
+                        ),
                 );
             }
 
