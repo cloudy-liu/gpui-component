@@ -6,14 +6,15 @@ use std::{
 };
 
 use gpui::{
-    App, AppContext as _, Bounds, Context, FocusHandle, IntoElement, KeyBinding, ListState,
-    ParentElement as _, Pixels, Point, Render, SharedString, Styled as _, Task, Window,
-    prelude::FluentBuilder as _, px,
+    App, AppContext as _, Bounds, Context, FocusHandle, InteractiveElement as _, IntoElement,
+    KeyBinding, ListState, ParentElement as _, Pixels, Point, Render, SharedString, Styled as _,
+    Task, Window, prelude::FluentBuilder as _, px,
 };
 
 use crate::{
     ElementExt,
     async_util::{Receiver, Sender, unbounded},
+    global_state::GlobalState,
     highlighter::HighlightTheme,
     input::{self, SelectAll},
     scroll::AutoScroll,
@@ -86,6 +87,15 @@ pub struct TextViewState {
     select_all: bool,
     restored_selection: bool,
     pub(super) auto_scroll: AutoScroll,
+    pub(super) selection_geometry_key: Option<(
+        Point<Pixels>,
+        Point<Pixels>,
+        Pixels,
+        gpui::TextStyle,
+        usize,
+        usize,
+    )>,
+    pub(super) selection_scroll_offset: Point<Pixels>,
 
     pub(super) parsed_content: ParsedContent,
     /// Content format (markdown / html), used to parse synchronously on the
@@ -148,6 +158,7 @@ impl TextViewState {
                         match parsed_update.result {
                             Ok(content) => {
                                 state.parsed_content = content;
+                                state.selection_geometry_key = None;
                                 state.parsed_error = None;
                             }
                             Err(err) => {
@@ -189,6 +200,8 @@ impl TextViewState {
             markdown_extensions,
             is_selecting: false,
             auto_scroll: AutoScroll::default(),
+            selection_geometry_key: None,
+            selection_scroll_offset: Point::default(),
             parsed_content: Default::default(),
             format,
             parsed_error: None,
@@ -407,6 +420,7 @@ impl TextViewState {
     }
 
     fn reset_selection(&mut self) {
+        self.selection_geometry_key = None;
         self.restored_selection = false;
         self.multi_click_selection = None;
         self.selected_text_override = None;
@@ -549,6 +563,71 @@ impl TextViewState {
         self.has_view_selection() || self.selection_points(window, cx).is_some()
     }
 
+    pub(super) fn sync_selection_geometry(
+        &mut self,
+        points: Option<(Point<Pixels>, Point<Pixels>)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.selectable
+            || self.select_all
+            || self.restored_selection
+            || self.multi_click_selection.is_some()
+        {
+            return;
+        }
+        let origin = self.bounds.origin + self.scroll_offset();
+        let key = points.map(|(start, end)| {
+            (
+                start - origin,
+                end - origin,
+                self.bounds.size.width,
+                window.text_style(),
+                self.revision,
+                self.parsed_content
+                    .node_cx
+                    .horizontal_scroll_revision
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )
+        });
+        if key == self.selection_geometry_key {
+            return;
+        }
+        self.selection_geometry_key = key;
+        self.parsed_content.document.clear_selection();
+        let Some(points) = points else {
+            return;
+        };
+        let mut node_cx = self.parsed_content.node_cx.clone();
+        node_cx.style = self.text_view_style.clone();
+        node_cx.interactions = self.interactions.clone();
+        // Probe coordinates must not replace the visible tree's navigation bounds.
+        node_cx.heading_bounds = Default::default();
+        node_cx.block_bounds = Default::default();
+        GlobalState::global_mut(cx).text_selection_probe = Some(points);
+        let _ = window.transact(|window| {
+            let mut probe = gpui::div()
+                .id("text-selection-geometry")
+                .child(
+                    self.parsed_content
+                        .document
+                        .render_root(None, &node_cx, window, cx),
+                )
+                .into_any_element();
+            probe.layout_as_root(
+                gpui::size(
+                    self.bounds.size.width.into(),
+                    gpui::AvailableSpace::MinContent,
+                ),
+                window,
+                cx,
+            );
+            probe.prepaint_at(origin, window, cx);
+            Err::<(), ()>(())
+        });
+        GlobalState::global_mut(cx).text_selection_probe = None;
+    }
+
     pub(super) fn on_action_select_all(
         &mut self,
         _: &SelectAll,
@@ -636,6 +715,24 @@ impl Render for TextViewState {
                         });
                     }
                 }
+                let scrolled_during_drag = state.update(cx, |state, _| {
+                    let offset = state.scroll_offset();
+                    let changed = state.is_selecting && state.selection_scroll_offset != offset;
+                    state.selection_scroll_offset = offset;
+                    changed
+                });
+                if scrolled_during_drag {
+                    if let Some(root) = window.root::<crate::Root>().flatten() {
+                        root.update(cx, |root, cx| {
+                            root.update_text_selection(window.mouse_position(), window, cx)
+                        });
+                    }
+                }
+                // Keep the document's rendered-view and text-style scopes.
+                let points = state.read(cx).selection_points(window, cx);
+                state.update(cx, |state, cx| {
+                    state.sync_selection_geometry(points, window, cx)
+                });
             })
     }
 }

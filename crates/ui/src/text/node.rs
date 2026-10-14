@@ -842,10 +842,7 @@ impl CodeBlock {
                 self.span.unwrap_or_default().start
             )
             .into();
-            let scroll = window
-                .use_keyed_state(key, cx, |_, _| ScrollHandle::default())
-                .read(cx)
-                .clone();
+            let scroll = node_cx.horizontal_scroll_handle(key, window, cx);
             horizontal_scroll_area(
                 ("code-scroll", options.ix),
                 &scroll,
@@ -902,9 +899,47 @@ pub(crate) struct NodeContext {
     pub(super) heading_bounds: Arc<Mutex<HashMap<SharedString, gpui::Bounds<gpui::Pixels>>>>,
     pub(super) block_bounds:
         Arc<Mutex<std::collections::BTreeMap<usize, gpui::Bounds<gpui::Pixels>>>>,
+    pub(super) horizontal_scroll_offsets: Arc<Mutex<HashMap<SharedString, gpui::Point<gpui::Pixels>>>>,
+    pub(super) horizontal_scroll_revision: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl NodeContext {
+    fn horizontal_scroll_handle(
+        &self,
+        key: SharedString,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> ScrollHandle {
+        if crate::global_state::GlobalState::global(cx)
+            .text_selection_probe
+            .is_some()
+        {
+            // A private handle carries the visible offset without letting the
+            // measurement pass mutate the real viewport or scrollbar extent.
+            let probe = ScrollHandle::default();
+            if let Some(offset) = self.horizontal_scroll_offsets.lock().unwrap().get(&key) {
+                probe.set_offset(*offset);
+            }
+            return probe;
+        }
+        let handle = window
+            .use_keyed_state(key.clone(), cx, |_, _| ScrollHandle::default())
+            .read(cx)
+            .clone();
+        let offset = handle.offset();
+        if self
+            .horizontal_scroll_offsets
+            .lock()
+            .unwrap()
+            .insert(key, offset)
+            != Some(offset)
+        {
+            self.horizontal_scroll_revision
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        handle
+    }
+
     pub(super) fn add_ref(&mut self, identifier: SharedString, link: LinkMark) {
         self.link_refs.insert(identifier, link);
     }
@@ -1776,10 +1811,7 @@ impl BlockNode {
                 options.ix
             ))
         };
-        let scroll_handle = window
-            .use_keyed_state(table_scroll_key, cx, |_, _| ScrollHandle::default())
-            .read(cx)
-            .clone();
+        let scroll_handle = node_cx.horizontal_scroll_handle(table_scroll_key, window, cx);
         let row_count = table.children.len();
         let render_row: super::table_rows::RenderRow = {
             let table = table.clone();
@@ -1846,6 +1878,9 @@ impl BlockNode {
             })
         };
         let rows = if row_count >= 40
+            && crate::global_state::GlobalState::global(cx)
+                .text_selection_probe
+                .is_none()
             && !style.table_fill
             && !table
                 .children

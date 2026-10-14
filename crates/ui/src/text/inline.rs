@@ -278,8 +278,20 @@ impl Inline {
         else {
             return (is_selectable, false, None);
         };
+        (
+            true,
+            true,
+            self.selection_range(text_layout, selection_start, selection_end),
+        )
+    }
+
+    fn selection_range(
+        &self,
+        text_layout: &TextLayout,
+        selection_start: Point<Pixels>,
+        selection_end: Point<Pixels>,
+    ) -> Option<Selection> {
         let line_height = text_layout.line_height();
-        let mask_bounds = window.content_mask().bounds;
 
         // Use for debug selection bounds
         // self.paint_selected_bounds(Bounds::from_corners(selection_start, selection_end), window, cx);
@@ -301,15 +313,7 @@ impl Inline {
                 }
             }
 
-            let char_center = point(pos.x + char_width.half(), pos.y + line_height.half());
-            if mask_bounds.contains(&char_center)
-                && point_in_text_selection(
-                    pos,
-                    char_width,
-                    selection_start,
-                    selection_end,
-                    line_height,
-                )
+            if point_in_text_selection(pos, char_width, selection_start, selection_end, line_height)
             {
                 if selection.is_none() {
                     selection = Some((offset..offset).into());
@@ -323,7 +327,7 @@ impl Inline {
             offset = next_offset;
         }
 
-        (true, true, selection)
+        selection
     }
 
     fn text_line_bounds(
@@ -632,6 +636,13 @@ impl Element for Inline {
     ) -> Self::PrepaintState {
         self.styled_text
             .prepaint(id, inspector_id, bounds, &mut (), window, cx);
+
+        if let Some((start, end)) = GlobalState::global(cx).text_selection_probe {
+            let selection = self.selection_range(&self.styled_text.layout(), start, end);
+            if let Ok(mut state) = self.state.lock() {
+                state.selection = selection;
+            }
+        }
 
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
         hitbox

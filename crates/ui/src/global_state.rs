@@ -11,6 +11,8 @@ impl Global for GlobalState {}
 
 pub struct GlobalState {
     pub(crate) text_view_state_stack: Vec<Entity<TextViewState>>,
+    /// Logical selection geometry pass. It never paints or registers input handlers.
+    pub(crate) text_selection_probe: Option<(gpui::Point<gpui::Pixels>, gpui::Point<gpui::Pixels>)>,
     /// Set of open popover IDs that use deferred rendering.
     /// When this set is not empty, we are inside at least one deferred context.
     /// This is used to prevent double-deferred elements which would cause GPUI to panic.
@@ -28,6 +30,7 @@ impl GlobalState {
     pub(crate) fn new() -> Self {
         Self {
             text_view_state_stack: Vec::new(),
+            text_selection_probe: None,
             open_deferred_popovers: HashSet::new(),
             app_menus: Vec::new(),
             suppress_text_selection: false,
