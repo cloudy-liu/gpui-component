@@ -207,6 +207,32 @@ impl TextViewState {
         self.parsed_content.document.source.clone()
     }
 
+    /// Scroll state used by the virtualized TextView. Hosts can preserve a
+    /// reading position and provide keyboard navigation without a second scroll container.
+    pub fn list_state(&self) -> ListState {
+        self.list_state.clone()
+    }
+
+    /// The top-level block containing a heading, including headings that have
+    /// not entered the virtualized viewport yet.
+    pub fn anchor_index(&self, anchor: &str) -> Option<usize> {
+        fn contains(nodes: &[node::BlockNode], anchor: &str) -> bool {
+            nodes.iter().any(|node| match node {
+                node::BlockNode::Heading { anchor: id, .. } => id.as_ref() == anchor,
+                node::BlockNode::Root { children, .. }
+                | node::BlockNode::Blockquote { children, .. }
+                | node::BlockNode::List { children, .. }
+                | node::BlockNode::ListItem { children, .. } => contains(children, anchor),
+                _ => false,
+            })
+        }
+        self.parsed_content
+            .document
+            .blocks
+            .iter()
+            .position(|node| contains(std::slice::from_ref(node), anchor))
+    }
+
     /// Last laid-out heading bounds in window coordinates. An outer scroll
     /// container can use these without giving up ownership of its scroll state.
     pub fn anchor_bounds(&self, anchor: &str) -> Option<Bounds<Pixels>> {
@@ -768,6 +794,24 @@ mod tests {
     use super::*;
     use crate::text::MarkdownNode;
     use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn anchor_index_finds_headings_before_the_first_layout(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let source = concat!(
+            "# Top\n\nParagraph.\n\n## Hidden\n\n## Hidden\n\n",
+            "> ### Nested\n\n# 中文标题\n"
+        );
+        let state = cx.update(|cx| cx.new(|cx| TextViewState::markdown(source, cx)));
+        state.read_with(cx, |state, _| {
+            assert_eq!(state.anchor_index("hidden"), Some(2));
+            assert_eq!(state.anchor_index("hidden-1"), Some(3));
+            assert_eq!(state.anchor_index("nested"), Some(4));
+            assert_eq!(state.anchor_index("中文标题"), Some(5));
+            assert_eq!(state.anchor_index("missing"), None);
+            assert!(state.anchor_bounds("hidden").is_none());
+        });
+    }
 
     #[gpui::test]
     fn set_text_then_push_str_appends_to_replaced_content(cx: &mut TestAppContext) {
