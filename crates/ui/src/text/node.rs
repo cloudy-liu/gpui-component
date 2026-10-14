@@ -538,13 +538,33 @@ impl Paragraph {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct Table {
     pub(crate) children: Vec<TableRow>,
     pub(crate) column_aligns: Vec<ColumnumnAlign>,
     pub(crate) span: Option<Span>,
     pub(crate) header_rows: usize,
     pub(crate) wrap: bool,
+    column_widths: Arc<Mutex<Option<TableColumnWidths>>>,
+}
+
+#[derive(Debug)]
+struct TableColumnWidths {
+    text_style: gpui::TextStyle,
+    rem_size: gpui::Pixels,
+    padding: f32,
+    fill: bool,
+    widths: Vec<f32>,
+}
+
+impl PartialEq for Table {
+    fn eq(&self, other: &Self) -> bool {
+        self.children == other.children
+            && self.column_aligns == other.column_aligns
+            && self.span == other.span
+            && self.header_rows == other.header_rows
+            && self.wrap == other.wrap
+    }
 }
 
 impl Table {
@@ -1670,6 +1690,31 @@ impl BlockNode {
         // Measure the widest text per column.
         let text_style = window.text_style();
         let font_size = text_style.font_size.to_pixels(window.rem_size());
+        let padding = node_cx
+            .style
+            .table_cell
+            .padding
+            .left
+            .map(|v| f32::from(v.to_pixels(px(0.).into(), window.rem_size())))
+            .unwrap_or(CELL_PAD_PX / 2.)
+            + node_cx
+                .style
+                .table_cell
+                .padding
+                .right
+                .map(|v| f32::from(v.to_pixels(px(0.).into(), window.rem_size())))
+                .unwrap_or(CELL_PAD_PX / 2.);
+        let cached = table.column_widths.lock().ok().and_then(|cached| {
+            cached
+                .as_ref()
+                .filter(|cached| {
+                    cached.text_style == text_style
+                        && cached.rem_size == window.rem_size()
+                        && cached.padding == padding
+                        && cached.fill == node_cx.style.table_fill
+                })
+                .map(|cached| cached.widths.clone())
+        });
         let mut col_w = vec![
             if node_cx.style.table_fill {
                 CELL_MIN_PX
@@ -1678,39 +1723,38 @@ impl BlockNode {
             };
             col_count
         ];
-        for row in table.children.iter() {
-            for (ix, cell) in row.children.iter().enumerate() {
-                let Some(slot) = col_w.get_mut(ix) else {
-                    continue;
-                };
-                let mut w = 0.0_f32;
-                for line in cell.children.text().split('\n') {
-                    let line = line.trim();
-                    if line.is_empty() {
+        if let Some(cached) = cached {
+            col_w = cached;
+        } else {
+            for row in table.children.iter() {
+                for (ix, cell) in row.children.iter().enumerate() {
+                    let Some(slot) = col_w.get_mut(ix) else {
                         continue;
+                    };
+                    let mut w = 0.0_f32;
+                    for line in cell.children.text().split('\n') {
+                        let line = line.trim();
+                        if line.is_empty() {
+                            continue;
+                        }
+                        let run = text_style.to_run(line.len());
+                        let line_w = window
+                            .text_system()
+                            .layout_line(line, font_size, &[run], None)
+                            .width;
+                        w = w.max(f32::from(line_w));
                     }
-                    let run = text_style.to_run(line.len());
-                    let line_w = window
-                        .text_system()
-                        .layout_line(line, font_size, &[run], None)
-                        .width;
-                    w = w.max(f32::from(line_w));
+                    *slot = slot.max(w + padding);
                 }
-                let padding = node_cx
-                    .style
-                    .table_cell
-                    .padding
-                    .left
-                    .map(|v| f32::from(v.to_pixels(px(0.).into(), window.rem_size())))
-                    .unwrap_or(CELL_PAD_PX / 2.)
-                    + node_cx
-                        .style
-                        .table_cell
-                        .padding
-                        .right
-                        .map(|v| f32::from(v.to_pixels(px(0.).into(), window.rem_size())))
-                        .unwrap_or(CELL_PAD_PX / 2.);
-                *slot = slot.max(w + padding);
+            }
+            if let Ok(mut cached) = table.column_widths.lock() {
+                *cached = Some(TableColumnWidths {
+                    text_style: text_style.clone(),
+                    rem_size: window.rem_size(),
+                    padding,
+                    fill: node_cx.style.table_fill,
+                    widths: col_w.clone(),
+                });
             }
         }
         let total_w: f32 = col_w.iter().sum();
