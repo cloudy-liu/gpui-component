@@ -10,6 +10,7 @@ mod reading_tests;
 pub(crate) mod selection;
 mod state;
 mod style;
+mod table_rows;
 mod text_view;
 mod utils;
 mod window_selection;

@@ -2,6 +2,7 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     ops::Range,
+    rc::Rc,
     sync::{Arc, Mutex},
 };
 
@@ -546,6 +547,7 @@ pub(crate) struct Table {
     pub(crate) header_rows: usize,
     pub(crate) wrap: bool,
     column_widths: Arc<Mutex<Option<TableColumnWidths>>>,
+    row_layout: Arc<Mutex<Option<super::table_rows::RowLayout>>>,
 }
 
 #[derive(Debug)]
@@ -1779,43 +1781,48 @@ impl BlockNode {
             .read(cx)
             .clone();
         let row_count = table.children.len();
-        let mut rows = Vec::with_capacity(row_count);
-        for (row_ix, row) in table.children.iter().enumerate() {
-            let mut cells = Vec::with_capacity(row.children.len());
-            for (ix, cell) in row.children.iter().enumerate() {
-                let align = table.column_align(ix);
-                let is_last_col = ix == row.children.len() - 1;
-                let width = col_w.get(ix).copied().unwrap_or(CELL_MIN_PX);
-                cells.push(
-                    div()
-                        .id(("cell", ix))
-                        // Measured content width is the flex-basis; `flex_grow`
-                        // (proportional to it) distributes any extra space so a
-                        // narrow table still fills the frame, while `flex_shrink_0`
-                        // keeps columns from collapsing when the table is wider
-                        // than the viewport and scrolls.
-                        .flex_basis(px(width))
-                        .flex_grow(if style.table_fill { width } else { 0. })
-                        .flex_shrink_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .when(align == ColumnumnAlign::Center, |this| this.text_center())
-                        .when(align == ColumnumnAlign::Right, |this| this.text_right())
-                        .px_2()
-                        .py_1()
-                        .when(!is_last_col, |this| {
-                            this.border_r_1().border_color(
-                                node_cx.style.border_color.unwrap_or(cx.theme().border),
-                            )
-                        })
-                        .refine_style(&style.table_cell)
-                        .when(row_ix < table.header_rows, |this| {
-                            this.refine_style(&style.table_header)
-                        })
-                        .child(cell.children.render(node_cx, window, cx)),
-                );
-            }
-            rows.push(
+        let render_row: super::table_rows::RenderRow = {
+            let table = table.clone();
+            let node_cx = node_cx.clone();
+            let col_w = col_w.clone();
+            Rc::new(move |row_ix, window, cx| {
+                let row = &table.children[row_ix];
+                let node_cx = &node_cx;
+                let style = &node_cx.style;
+                let mut cells = Vec::with_capacity(row.children.len());
+                for (ix, cell) in row.children.iter().enumerate() {
+                    let align = table.column_align(ix);
+                    let is_last_col = ix == row.children.len() - 1;
+                    let width = col_w.get(ix).copied().unwrap_or(CELL_MIN_PX);
+                    cells.push(
+                        div()
+                            .id(("cell", ix))
+                            // Measured content width is the flex-basis; `flex_grow`
+                            // (proportional to it) distributes any extra space so a
+                            // narrow table still fills the frame, while `flex_shrink_0`
+                            // keeps columns from collapsing when the table is wider
+                            // than the viewport and scrolls.
+                            .flex_basis(px(width))
+                            .flex_grow(if style.table_fill { width } else { 0. })
+                            .flex_shrink_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .when(align == ColumnumnAlign::Center, |this| this.text_center())
+                            .when(align == ColumnumnAlign::Right, |this| this.text_right())
+                            .px_2()
+                            .py_1()
+                            .when(!is_last_col, |this| {
+                                this.border_r_1().border_color(
+                                    node_cx.style.border_color.unwrap_or(cx.theme().border),
+                                )
+                            })
+                            .refine_style(&style.table_cell)
+                            .when(row_ix < table.header_rows, |this| {
+                                this.refine_style(&style.table_header)
+                            })
+                            .child(cell.children.render(node_cx, window, cx)),
+                    );
+                }
                 div()
                     .id(("row", row_ix))
                     .when(table.striped(row_ix), |this| {
@@ -1834,9 +1841,34 @@ impl BlockNode {
                     )
                     .flex()
                     .flex_row()
-                    .children(cells),
-            );
-        }
+                    .children(cells)
+                    .into_any_element()
+            })
+        };
+        let rows = if row_count >= 40
+            && !style.table_fill
+            && !table
+                .children
+                .iter()
+                .flat_map(|row| &row.children)
+                .flat_map(|cell| &cell.children.children)
+                .any(|node| node.image.is_some())
+        {
+            super::table_rows::rows(
+                &table.row_layout,
+                px(total_w - 2.),
+                row_count,
+                render_row,
+                style,
+                window,
+                cx,
+            )
+        } else {
+            div()
+                .w_full()
+                .children((0..row_count).map(|index| render_row(index, window, cx)))
+                .into_any_element()
+        };
 
         div()
             .pb(rems(1.))
@@ -1862,7 +1894,7 @@ impl BlockNode {
                         .border_1()
                         .border_color(node_cx.style.border_color.unwrap_or(cx.theme().border))
                         .rounded(style.table_radius.unwrap_or(cx.theme().radius))
-                        .children(rows),
+                        .child(rows),
                 ),
             )
             .into_any_element()
