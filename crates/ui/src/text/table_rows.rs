@@ -105,7 +105,7 @@ pub(super) fn rows(
                 .collect::<Vec<_>>()
         },
         |_, elements, window, cx| {
-            for element in elements {
+            for mut element in elements {
                 element.paint(window, cx);
             }
         },
