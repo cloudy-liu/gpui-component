@@ -46,6 +46,7 @@ pub struct TextView {
     style: StyleRefinement,
     selectable: bool,
     scrollable: bool,
+    show_scrollbar: bool,
     code_block_actions: Option<Arc<CodeBlockActionsFn>>,
     markdown_extensions: Arc<MarkdownExtensions>,
     interactions: super::interaction::TextViewInteractions,
@@ -87,6 +88,7 @@ impl TextView {
             style: StyleRefinement::default(),
             selectable: false,
             scrollable: false,
+            show_scrollbar: true,
             code_block_actions: None,
             markdown_extensions: Arc::default(),
             interactions: Default::default(),
@@ -105,6 +107,7 @@ impl TextView {
             state: None,
             selectable: false,
             scrollable: false,
+            show_scrollbar: true,
             code_block_actions: None,
             markdown_extensions: Arc::default(),
             interactions: Default::default(),
@@ -123,6 +126,7 @@ impl TextView {
             state: None,
             selectable: false,
             scrollable: false,
+            show_scrollbar: true,
             code_block_actions: None,
             markdown_extensions: Arc::default(),
             interactions: Default::default(),
@@ -156,6 +160,13 @@ impl TextView {
     /// This mode is suitable for small content, such as a few lines of text, a label, etc.
     pub fn scrollable(mut self, scrollable: bool) -> Self {
         self.scrollable = scrollable;
+        self
+    }
+
+    /// Hide the built-in scrollbar when the owner supplies one for the same list state.
+    /// Virtualized scrolling remains enabled by [`Self::scrollable`].
+    pub fn scrollbar_visible(mut self, visible: bool) -> Self {
+        self.show_scrollbar = visible;
         self
     }
 
@@ -350,7 +361,9 @@ impl Element for TextView {
             .key_context("TextView")
             .track_focus(&focus_handle)
             .when(self.scrollable, |this| {
-                this.size_full().vertical_scrollbar(&list_state)
+                this.size_full().when(self.show_scrollbar, |this| {
+                    this.vertical_scrollbar(&list_state)
+                })
             })
             .relative()
             .on_action(move |_: &crate::input::Copy, window, cx| {

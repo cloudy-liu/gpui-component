@@ -16,10 +16,10 @@ use markdown::mdast;
 use ropey::Rope;
 
 use crate::{
-    ActiveTheme as _, Icon, IconName, StyledExt, h_flex,
+    ActiveTheme as _, ElementExt as _, Icon, IconName, StyledExt, h_flex,
     highlighter::{HighlightTheme, LanguageRegistry, SyntaxHighlighter},
     input::{InputEdit, Point, RopeExt as _},
-    scroll::horizontal_scroll_area,
+    scroll::{ScrollableElement as _, Scrollbar, horizontal_scroll_area},
     text::{
         CodeBlockActionsFn, MarkdownExtensions, MarkdownNode,
         document::NodeRenderOptions,
@@ -548,6 +548,7 @@ pub(crate) struct Table {
     pub(crate) wrap: bool,
     column_widths: Arc<Mutex<Option<TableColumnWidths>>>,
     row_layout: Arc<Mutex<Option<super::table_rows::RowLayout>>>,
+    wrap_width: Arc<Mutex<Option<gpui::Pixels>>>,
 }
 
 #[derive(Debug)]
@@ -570,6 +571,19 @@ impl PartialEq for Table {
 }
 
 impl Table {
+    fn scroll_key(&self, index: usize, window: &Window) -> SharedString {
+        match self.span {
+            Some(span) => format!(
+                "{}-table-scroll-{}:{}",
+                window.current_view(),
+                span.start,
+                span.end
+            )
+            .into(),
+            None => format!("{}-table-scroll-{index}", window.current_view()).into(),
+        }
+    }
+
     pub(crate) fn column_align(&self, index: usize) -> ColumnumnAlign {
         self.column_aligns.get(index).copied().unwrap_or_default()
     }
@@ -899,8 +913,11 @@ pub(crate) struct NodeContext {
     pub(super) heading_bounds: Arc<Mutex<HashMap<SharedString, gpui::Bounds<gpui::Pixels>>>>,
     pub(super) block_bounds:
         Arc<Mutex<std::collections::BTreeMap<usize, gpui::Bounds<gpui::Pixels>>>>,
-    pub(super) horizontal_scroll_offsets: Arc<Mutex<HashMap<SharedString, gpui::Point<gpui::Pixels>>>>,
+    pub(super) horizontal_scroll_offsets:
+        Arc<Mutex<HashMap<SharedString, gpui::Point<gpui::Pixels>>>>,
     pub(super) horizontal_scroll_revision: Arc<std::sync::atomic::AtomicUsize>,
+    pub(super) owner: Option<gpui::WeakEntity<super::TextViewState>>,
+    pub(super) list_item: Option<usize>,
 }
 
 impl NodeContext {
@@ -1698,7 +1715,10 @@ impl BlockNode {
         }
 
         // Scroll mode is opted in via `style.table` overflow-x: scroll.
-        if !table.wrap && matches!(node_cx.style.table.overflow.x, Some(Overflow::Scroll)) {
+        if !table.wrap
+            && node_cx.style.table.text.white_space != Some(gpui::WhiteSpace::Normal)
+            && matches!(node_cx.style.table.overflow.x, Some(Overflow::Scroll))
+        {
             Self::render_scroll_table(table, col_lens.len(), options, node_cx, window, cx)
         } else {
             Self::render_wrap_table(table, &col_lens, options, node_cx, window, cx)
@@ -1797,20 +1817,7 @@ impl BlockNode {
         let total_w: f32 = col_w.iter().sum();
 
         let style = &node_cx.style;
-        let table_scroll_key = if let Some(span) = table.span {
-            SharedString::from(format!(
-                "{}-table-scroll-{}:{}",
-                window.current_view(),
-                span.start,
-                span.end
-            ))
-        } else {
-            SharedString::from(format!(
-                "{}-table-scroll-{}",
-                window.current_view(),
-                options.ix
-            ))
-        };
+        let table_scroll_key = table.scroll_key(options.ix, window);
         let scroll_handle = node_cx.horizontal_scroll_handle(table_scroll_key, window, cx);
         let row_count = table.children.len();
         let render_row: super::table_rows::RenderRow = {
@@ -1949,49 +1956,54 @@ impl BlockNode {
 
         let style = &node_cx.style;
         let row_count = table.children.len();
-        let mut rows = Vec::with_capacity(row_count);
-        for (row_ix, row) in table.children.iter().enumerate() {
-            let mut cells = Vec::with_capacity(row.children.len());
-            for (ix, cell) in row.children.iter().enumerate() {
-                let align = table.column_align(ix);
-                let is_last_col = ix == row.children.len() - 1;
-                let len = col_lens
-                    .get(ix)
-                    .copied()
-                    .unwrap_or(MAX_LENGTH)
-                    .min(MAX_LENGTH);
+        let render_row: super::table_rows::RenderRow = {
+            let table = table.clone();
+            let col_lens = col_lens.to_vec();
+            let node_cx = node_cx.clone();
+            Rc::new(move |row_ix, window, cx| {
+                let row = &table.children[row_ix];
+                let node_cx = &node_cx;
+                let style = &node_cx.style;
+                let mut cells = Vec::with_capacity(row.children.len());
+                for (ix, cell) in row.children.iter().enumerate() {
+                    let align = table.column_align(ix);
+                    let is_last_col = ix == row.children.len() - 1;
+                    let len = col_lens
+                        .get(ix)
+                        .copied()
+                        .unwrap_or(MAX_LENGTH)
+                        .min(MAX_LENGTH);
 
-                cells.push(
-                    div()
-                        .id(("cell", ix))
-                        .flex()
-                        .items_center()
-                        .overflow_hidden()
-                        .when(align == ColumnumnAlign::Center, |this| this.text_center())
-                        .when(align == ColumnumnAlign::Right, |this| this.text_right())
-                        .min_w_16()
-                        .w(Length::Definite(relative(len as f32)))
-                        .px_2()
-                        .py_1()
-                        .when(!is_last_col, |this| {
-                            this.border_r_1().border_color(
-                                node_cx.style.border_color.unwrap_or(cx.theme().border),
-                            )
-                        })
-                        .refine_style(&style.table_cell)
-                        .when(row_ix < table.header_rows, |this| {
-                            this.refine_style(&style.table_header)
-                        })
-                        .child(
-                            div()
-                                .w_full()
-                                .whitespace_normal()
-                                .child(cell.children.render(node_cx, window, cx)),
-                        ),
-                );
-            }
+                    cells.push(
+                        div()
+                            .id(("cell", ix))
+                            .flex()
+                            .items_start()
+                            .overflow_hidden()
+                            .when(align == ColumnumnAlign::Center, |this| this.text_center())
+                            .when(align == ColumnumnAlign::Right, |this| this.text_right())
+                            .min_w_16()
+                            .w(Length::Definite(relative(len as f32)))
+                            .px_2()
+                            .py_1()
+                            .when(!is_last_col, |this| {
+                                this.border_r_1().border_color(
+                                    node_cx.style.border_color.unwrap_or(cx.theme().border),
+                                )
+                            })
+                            .refine_style(&style.table_cell)
+                            .when(row_ix < table.header_rows, |this| {
+                                this.refine_style(&style.table_header)
+                            })
+                            .child(
+                                div()
+                                    .w_full()
+                                    .whitespace_normal()
+                                    .child(cell.children.render(node_cx, window, cx)),
+                            ),
+                    );
+                }
 
-            rows.push(
                 div()
                     .id(("row", row_ix))
                     .when(table.striped(row_ix), |this| {
@@ -2010,26 +2022,101 @@ impl BlockNode {
                     )
                     .flex()
                     .flex_row()
-                    .children(cells),
-            );
-        }
-
-        div()
-            .pb(rems(1.))
-            .when_some(style.table_gap, |el, gap| el.pb(gap))
-            .w_full()
-            .child(
-                div()
-                    .id(("table", options.ix))
-                    .w_full()
-                    .border_1()
-                    .border_color(node_cx.style.border_color.unwrap_or(cx.theme().border))
-                    .rounded(style.table_radius.unwrap_or(cx.theme().radius))
-                    .overflow_hidden()
-                    .children(rows)
-                    .refine_style(&style.table),
+                    .children(cells)
+                    .into_any_element()
+            })
+        };
+        let virtualize = row_count >= 40
+            && crate::global_state::GlobalState::global(cx)
+                .text_selection_probe
+                .is_none()
+            && !table
+                .children
+                .iter()
+                .flat_map(|row| &row.children)
+                .flat_map(|cell| &cell.children.children)
+                .any(|node| node.image.is_some());
+        let width = *table.wrap_width.lock().unwrap();
+        let rows = if let Some(width) = width.filter(|_| virtualize) {
+            super::table_rows::rows(
+                &table.row_layout,
+                width,
+                row_count,
+                render_row,
+                style,
+                window,
+                cx,
             )
-            .into_any_element()
+        } else {
+            div()
+                .w_full()
+                .children((0..row_count).map(|ix| render_row(ix, window, cx)))
+                .into_any_element()
+        };
+
+        let wrap_width = table.wrap_width.clone();
+        let state = node_cx.owner.clone();
+        let list_item = node_cx.list_item;
+        let owner = window.current_view();
+        let frame = div()
+            .id(("table", options.ix))
+            .w_full()
+            .border_1()
+            .border_color(node_cx.style.border_color.unwrap_or(cx.theme().border))
+            .rounded(style.table_radius.unwrap_or(cx.theme().radius))
+            .overflow_hidden()
+            .child(rows)
+            .when(virtualize, |frame| {
+                frame.on_prepaint(move |bounds, window, cx| {
+                    // on_prepaint's absolute canvas already excludes the frame border.
+                    let width = bounds.size.width;
+                    let mut previous = wrap_width.lock().unwrap();
+                    if *previous != Some(width) {
+                        *previous = Some(width);
+                        // The first frame supplies the actual flex-grid width.
+                        // Reuse measured row heights thereafter; defer list
+                        // invalidation until its current prepaint borrow ends.
+                        window.defer(cx, move |_, cx| {
+                            if let Some(state) = state.and_then(|state| state.upgrade()) {
+                                let state = state.read(cx);
+                                if let Some(index) = list_item.filter(|_| state.scrollable) {
+                                    state.list_state.remeasure_items(index..index + 1);
+                                }
+                            }
+                            cx.notify(owner);
+                        });
+                    }
+                })
+            });
+        let gap = style.table_gap.unwrap_or(window.rem_size());
+        if matches!(style.table.overflow.x, Some(Overflow::Scroll)) {
+            let scroll =
+                node_cx.horizontal_scroll_handle(table.scroll_key(options.ix, window), window, cx);
+            // Keep each column readable; tables with too many columns scroll.
+            // The bottom gap gives the native scrollbar room below the last row.
+            let track = div()
+                .w_full()
+                .min_w(window.rem_size() * (4. * col_lens.len() as f32))
+                .pb(gap.max(Scrollbar::width()))
+                .child(frame);
+            div()
+                .relative()
+                .w_full()
+                .child(horizontal_scroll_area(
+                    ("table-scroll", options.ix),
+                    &scroll,
+                    &style.table,
+                    track,
+                ))
+                .horizontal_scrollbar(&scroll)
+                .into_any_element()
+        } else {
+            div()
+                .w_full()
+                .pb(gap)
+                .child(frame.refine_style(&style.table))
+                .into_any_element()
+        }
     }
 
     pub(crate) fn render_block(

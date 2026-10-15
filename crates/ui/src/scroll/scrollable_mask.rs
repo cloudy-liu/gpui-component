@@ -157,6 +157,9 @@ impl Element for ScrollableMask {
 
                     let mut offset = scroll_handle.offset();
                     let mut delta = event.delta.pixel_delta(line_height);
+                    if is_horizontal && event.modifiers.shift && delta.x.is_zero() {
+                        delta = gpui::point(delta.y, px(0.));
+                    }
 
                     // Limit for only one way scrolling at same time.
                     // When use MacBook touchpad we may get both x and y delta,
@@ -255,5 +258,12 @@ mod tests {
         });
 
         assert_eq!(scroll_handle.offset().x, px(-40.));
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(10.), px(10.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-40.))),
+            modifiers: gpui::Modifiers { shift: true, ..Default::default() },
+            ..Default::default()
+        });
+        assert_eq!(scroll_handle.offset().x, px(-80.), "Shift-wheel must work with an ordinary mouse");
     }
 }

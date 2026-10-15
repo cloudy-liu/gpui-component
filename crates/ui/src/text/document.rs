@@ -172,6 +172,8 @@ impl ParsedDocument {
                 let node_cx = node_cx.clone();
                 let blocks = blocks.clone();
                 move |ix, window, cx| {
+                    let mut node_cx = node_cx.clone();
+                    node_cx.list_item = Some(ix);
                     let is_last = ix + 1 == blocks.len();
                     let block_bounds = node_cx.block_bounds.clone();
                     div()

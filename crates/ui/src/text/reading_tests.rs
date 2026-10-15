@@ -10,7 +10,7 @@ use crate::{
 };
 use gpui::{
     AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, Styled as _, TestAppContext, Window, div, px,
+    Render, StatefulInteractiveElement as _, Styled as _, TestAppContext, Window, div, px,
 };
 
 fn document(source: &str, alerts: bool) -> super::document::ParsedDocument {
@@ -717,6 +717,301 @@ fn code_and_keyboard_chips_preserve_copy_and_selection_when_styles_change(cx: &m
         let _ = window.draw(cx);
     });
     assert_eq!(text.read_with(vcx, |text, _| text.selected_text()), partial);
+}
+
+struct AdaptiveTableRoot {
+    text: Entity<TextViewState>,
+    width: f32,
+    scroll: gpui::ScrollHandle,
+    virtualized: bool,
+}
+impl Render for AdaptiveTableRoot {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let mut style = TextViewStyle::default();
+        style.table.overflow.x = Some(gpui::Overflow::Scroll);
+        style.table.text.white_space = Some(gpui::WhiteSpace::Normal);
+        style.table_fill = false;
+        div()
+            .id("adaptive-table-reader")
+            .w(px(self.width))
+            .h(px(400.))
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll)
+            .text_size(px(16.))
+            .child(
+                TextView::new(&self.text)
+                    .selectable(true)
+                    .scrollable(self.virtualized)
+                    .style(style),
+            )
+    }
+}
+#[gpui::test]
+fn adaptive_tables_wrap_cells_and_reflow_without_losing_text(cx: &mut TestAppContext) {
+    cx.update(crate::init);
+    let content = format!(
+        "| Name | Description | Result |\n| --- | --- | --- |\n| item | {} | LAST_COLUMN |\n",
+        "Words in this description wrap inside their own column. 中文内容。 ".repeat(8)
+    );
+    let (root, vcx) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| AdaptiveTableRoot {
+            text: cx.new(|cx| TextViewState::markdown(&content, cx)),
+            width: 360.,
+            scroll: Default::default(),
+            virtualized: false,
+        });
+        crate::Root::new(view, window, cx)
+    });
+    let view = root.read_with(vcx, |root, _| {
+        root.view().clone().downcast::<AdaptiveTableRoot>().unwrap()
+    });
+    let text = view.read_with(vcx, |view, _| view.text.clone());
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let narrow = text.read_with(vcx, |text, _| text.block_bounds(0).unwrap());
+    assert!(
+        narrow.size.height > px(120.),
+        "long cells must wrap rather than stay on one line: {narrow:?}"
+    );
+    assert!(
+        narrow.right() <= px(360.),
+        "the table viewport must fit the reader"
+    );
+    text.update(vcx, |text, cx| text.select_all(cx));
+    let selected = text.read_with(vcx, |text, _| text.selected_text());
+    assert!(selected.contains("LAST_COLUMN") && selected.contains("中文内容"));
+    view.update(vcx, |view, cx| {
+        view.width = 620.;
+        cx.notify();
+    });
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let wide = text.read_with(vcx, |text, _| text.block_bounds(0).unwrap());
+    assert!(
+        wide.size.height < narrow.size.height,
+        "widening the reader must reflow wrapped rows"
+    );
+    text.update(vcx, |text, cx| text.select_all(cx));
+    assert_eq!(
+        text.read_with(vcx, |text, _| text.selected_text()),
+        selected
+    );
+}
+
+#[gpui::test]
+fn adaptive_tables_scroll_to_the_last_column_when_columns_cannot_fit(cx: &mut TestAppContext) {
+    cx.update(crate::init);
+    let headers = (0..12).map(|i| format!(" H{i} |")).collect::<String>();
+    let row = (0..11).map(|i| format!(" v{i} |")).collect::<String>();
+    let content = format!(
+        "|{headers}\n|{}\n|{row} [end](https://example.com/last) |\n",
+        " --- |".repeat(12)
+    );
+    let (root, vcx) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| AdaptiveTableRoot {
+            text: cx.new(|cx| TextViewState::markdown(&content, cx)),
+            width: 360.,
+            scroll: Default::default(),
+            virtualized: false,
+        });
+        crate::Root::new(view, window, cx)
+    });
+    let text = root.read_with(vcx, |root, cx| {
+        root.view()
+            .clone()
+            .downcast::<AdaptiveTableRoot>()
+            .unwrap()
+            .read(cx)
+            .text
+            .clone()
+    });
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    vcx.simulate_event(gpui::ScrollWheelEvent {
+        position: gpui::point(px(100.), px(40.)),
+        delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-2000.))),
+        modifiers: gpui::Modifiers {
+            shift: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let last = root.read_with(vcx, |root, _| {
+        *root.selectable_text_inlines[&text.entity_id()]
+            .last()
+            .unwrap()
+    });
+    assert!(
+        last.left() >= px(0.) && last.right() <= px(360.),
+        "last column must scroll fully into view: {last:?}"
+    );
+    vcx.simulate_click(last.center(), gpui::Modifiers::none());
+    assert_eq!(
+        vcx.opened_url().as_deref(),
+        Some("https://example.com/last")
+    );
+}
+
+#[gpui::test]
+fn adaptive_tables_virtualize_rows_and_remeasure_after_resize(cx: &mut TestAppContext) {
+    cx.update(crate::init);
+    let mut content = "| Row | Description | Result |\n| --- | --- | --- |\n".to_string();
+    for row in 0..1000 {
+        content.push_str(&format!("| {row} | Words wrap across several lines in this description. | [end {row}](https://example.com/{row}) |\n"));
+    }
+    let (root, vcx) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| AdaptiveTableRoot {
+            text: cx.new(|cx| TextViewState::markdown(&content, cx)),
+            width: 360.,
+            scroll: Default::default(),
+            virtualized: true,
+        });
+        crate::Root::new(view, window, cx)
+    });
+    let view = root.read_with(vcx, |root, _| {
+        root.view().clone().downcast::<AdaptiveTableRoot>().unwrap()
+    });
+    let text = view.read_with(vcx, |view, _| view.text.clone());
+    let initial = std::time::Instant::now();
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let initial_ms = initial.elapsed().as_secs_f64() * 1000.;
+    let narrow = text.read_with(vcx, |text, _| text.block_bounds(0).unwrap().size.height);
+    let start = std::time::Instant::now();
+    for frame in 0..40 {
+        view.update(vcx, |view, cx| {
+            view.text
+                .read(cx)
+                .list_state()
+                .scroll_by(px(if frame < 20 { 200. } else { -200. }));
+            cx.notify();
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let painted = root.read_with(vcx, |root, _| {
+            root.selectable_text_inlines[&text.entity_id()].len()
+        });
+        assert!(
+            painted < 100,
+            "only visible rows should be prepainted, got {painted} inlines"
+        );
+    }
+    eprintln!(
+        "adaptive 1000-row table: initial {initial_ms:.2}ms, warm scroll {:.2}ms/frame (GPUI test backend)",
+        start.elapsed().as_secs_f64() * 1000. / 40.
+    );
+    view.update(vcx, |view, cx| {
+        view.width = 620.;
+        view.text
+            .read(cx)
+            .list_state()
+            .scroll_to(Default::default());
+        cx.notify();
+    });
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    vcx.run_until_parked();
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let wide = text.read_with(vcx, |text, _| text.block_bounds(0).unwrap().size.height);
+    assert!(
+        wide < narrow,
+        "row height cache must be invalidated when columns widen"
+    );
+    view.update(vcx, |view, cx| {
+        view.text.read(cx).list_state().scroll_to_end();
+        cx.notify();
+    });
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let last = root.read_with(vcx, |root, _| {
+        *root.selectable_text_inlines[&text.entity_id()]
+            .last()
+            .unwrap()
+    });
+    vcx.simulate_click(last.center(), gpui::Modifiers::none());
+    assert_eq!(vcx.opened_url().as_deref(), Some("https://example.com/999"));
+    text.update(vcx, |text, cx| text.select_all(cx));
+    assert!(
+        text.read_with(vcx, |text, _| text.selected_text())
+            .contains("end 999")
+    );
+}
+
+#[gpui::test]
+fn adaptive_html_table_remeasures_its_containing_document_item(cx: &mut TestAppContext) {
+    cx.update(crate::init);
+    let mut content = "Paragraph before the HTML table.\n\n".repeat(5);
+    content.push_str("<table><tr><th>Row</th><th>Description</th><th>Result</th></tr>\n");
+    for row in 0..100 {
+        content.push_str(&format!("<tr><td>{row}</td><td>Words wrap across several lines in this description.</td><td><a href=\"https://example.com/{row}\">end {row}</a></td></tr>\n"));
+    }
+    content.push_str("</table>\n");
+    let (root, vcx) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| AdaptiveTableRoot {
+            text: cx.new(|cx| TextViewState::markdown(&content, cx)),
+            width: 360.,
+            scroll: Default::default(),
+            virtualized: true,
+        });
+        crate::Root::new(view, window, cx)
+    });
+    let view = root.read_with(vcx, |root, _| {
+        root.view().clone().downcast::<AdaptiveTableRoot>().unwrap()
+    });
+    let text = view.read_with(vcx, |view, _| view.text.clone());
+    let draw = |vcx: &mut gpui::VisualTestContext| {
+        for _ in 0..3 {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+    };
+    draw(vcx);
+    let (narrow, old_max) = text.read_with(vcx, |text, _| {
+        (
+            text.block_bounds(5).unwrap().size.height,
+            text.list_state().max_offset_for_scrollbar().y,
+        )
+    });
+    view.update(vcx, |view, cx| {
+        view.width = 620.;
+        cx.notify();
+    });
+    draw(vcx);
+    text.read_with(vcx, |text, _| {
+        let wide = text.block_bounds(5).unwrap().size.height;
+        assert!(wide < narrow);
+        let new_max = text.list_state().max_offset_for_scrollbar().y;
+        assert!(
+            (old_max - new_max - (narrow - wide)).abs() < px(1.),
+            "the containing Root item's cached height must follow the table reflow"
+        );
+    });
+    view.update(vcx, |view, cx| {
+        view.text.read(cx).list_state().scroll_to_end();
+        cx.notify();
+    });
+    draw(vcx);
+    let last = root.read_with(vcx, |root, _| {
+        *root.selectable_text_inlines[&text.entity_id()]
+            .last()
+            .unwrap()
+    });
+    vcx.simulate_click(last.center(), gpui::Modifiers::none());
+    assert_eq!(vcx.opened_url().as_deref(), Some("https://example.com/99"));
 }
 
 #[gpui::test]

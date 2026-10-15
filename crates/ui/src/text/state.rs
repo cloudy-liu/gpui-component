@@ -676,6 +676,7 @@ impl Render for TextViewState {
         let state = cx.entity();
         let document = self.parsed_content.document.clone();
         let mut node_cx = self.parsed_content.node_cx.clone();
+        node_cx.owner = Some(cx.weak_entity());
 
         node_cx.code_block_actions = self.code_block_actions.clone();
         node_cx.interactions = self.interactions.clone();
