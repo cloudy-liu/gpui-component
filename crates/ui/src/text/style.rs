@@ -96,6 +96,8 @@ pub struct TextViewStyle {
     /// Set `overflow_x: scroll` here to keep table cells on a single line and
     /// scroll the table horizontally instead of wrapping cell content, e.g.
     /// `TextViewStyle::default().table({ let mut s = StyleRefinement::default(); s.overflow.x = Some(Overflow::Scroll); s })`.
+    /// Combine it with `table.text.white_space = Some(WhiteSpace::Normal)` to
+    /// wrap cells first and scroll only when minimum column widths cannot fit.
     pub table: StyleRefinement,
     /// Style refinement applied to each table cell.
     pub table_cell: StyleRefinement,

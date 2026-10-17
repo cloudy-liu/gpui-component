@@ -2,6 +2,7 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     ops::Range,
+    rc::Rc,
     sync::{Arc, Mutex},
 };
 
@@ -15,10 +16,10 @@ use markdown::mdast;
 use ropey::Rope;
 
 use crate::{
-    ActiveTheme as _, Icon, IconName, StyledExt, h_flex,
+    ActiveTheme as _, ElementExt as _, Icon, IconName, StyledExt, h_flex,
     highlighter::{HighlightTheme, LanguageRegistry, SyntaxHighlighter},
     input::{InputEdit, Point, RopeExt as _},
-    scroll::horizontal_scroll_area,
+    scroll::{ScrollableElement as _, Scrollbar, horizontal_scroll_area},
     text::{
         CodeBlockActionsFn, MarkdownExtensions, MarkdownNode,
         document::NodeRenderOptions,
@@ -538,16 +539,57 @@ impl Paragraph {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct Table {
     pub(crate) children: Vec<TableRow>,
     pub(crate) column_aligns: Vec<ColumnumnAlign>,
     pub(crate) span: Option<Span>,
+    pub(crate) header_rows: usize,
+    pub(crate) wrap: bool,
+    column_widths: Arc<Mutex<Option<TableColumnWidths>>>,
+    row_layout: Arc<Mutex<Option<super::table_rows::RowLayout>>>,
+    wrap_width: Arc<Mutex<Option<gpui::Pixels>>>,
+}
+
+#[derive(Debug)]
+struct TableColumnWidths {
+    text_style: gpui::TextStyle,
+    rem_size: gpui::Pixels,
+    padding: f32,
+    fill: bool,
+    widths: Vec<f32>,
+}
+
+impl PartialEq for Table {
+    fn eq(&self, other: &Self) -> bool {
+        self.children == other.children
+            && self.column_aligns == other.column_aligns
+            && self.span == other.span
+            && self.header_rows == other.header_rows
+            && self.wrap == other.wrap
+    }
 }
 
 impl Table {
+    fn scroll_key(&self, index: usize, window: &Window) -> SharedString {
+        match self.span {
+            Some(span) => format!(
+                "{}-table-scroll-{}:{}",
+                window.current_view(),
+                span.start,
+                span.end
+            )
+            .into(),
+            None => format!("{}-table-scroll-{index}", window.current_view()).into(),
+        }
+    }
+
     pub(crate) fn column_align(&self, index: usize) -> ColumnumnAlign {
         self.column_aligns.get(index).copied().unwrap_or_default()
+    }
+
+    pub(crate) fn striped(&self, row: usize) -> bool {
+        row >= self.header_rows && (row - self.header_rows) % 2 == 1
     }
 }
 
@@ -814,10 +856,7 @@ impl CodeBlock {
                 self.span.unwrap_or_default().start
             )
             .into();
-            let scroll = window
-                .use_keyed_state(key, cx, |_, _| ScrollHandle::default())
-                .read(cx)
-                .clone();
+            let scroll = node_cx.horizontal_scroll_handle(key, window, cx);
             horizontal_scroll_area(
                 ("code-scroll", options.ix),
                 &scroll,
@@ -874,9 +913,50 @@ pub(crate) struct NodeContext {
     pub(super) heading_bounds: Arc<Mutex<HashMap<SharedString, gpui::Bounds<gpui::Pixels>>>>,
     pub(super) block_bounds:
         Arc<Mutex<std::collections::BTreeMap<usize, gpui::Bounds<gpui::Pixels>>>>,
+    pub(super) horizontal_scroll_offsets:
+        Arc<Mutex<HashMap<SharedString, gpui::Point<gpui::Pixels>>>>,
+    pub(super) horizontal_scroll_revision: Arc<std::sync::atomic::AtomicUsize>,
+    pub(super) owner: Option<gpui::WeakEntity<super::TextViewState>>,
+    pub(super) list_item: Option<usize>,
 }
 
 impl NodeContext {
+    fn horizontal_scroll_handle(
+        &self,
+        key: SharedString,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> ScrollHandle {
+        if crate::global_state::GlobalState::global(cx)
+            .text_selection_probe
+            .is_some()
+        {
+            // A private handle carries the visible offset without letting the
+            // measurement pass mutate the real viewport or scrollbar extent.
+            let probe = ScrollHandle::default();
+            if let Some(offset) = self.horizontal_scroll_offsets.lock().unwrap().get(&key) {
+                probe.set_offset(*offset);
+            }
+            return probe;
+        }
+        let handle = window
+            .use_keyed_state(key.clone(), cx, |_, _| ScrollHandle::default())
+            .read(cx)
+            .clone();
+        let offset = handle.offset();
+        if self
+            .horizontal_scroll_offsets
+            .lock()
+            .unwrap()
+            .insert(key, offset)
+            != Some(offset)
+        {
+            self.horizontal_scroll_revision
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        handle
+    }
+
     pub(super) fn add_ref(&mut self, identifier: SharedString, link: LinkMark) {
         self.link_refs.insert(identifier, link);
     }
@@ -1635,7 +1715,10 @@ impl BlockNode {
         }
 
         // Scroll mode is opted in via `style.table` overflow-x: scroll.
-        if matches!(node_cx.style.table.overflow.x, Some(Overflow::Scroll)) {
+        if !table.wrap
+            && node_cx.style.table.text.white_space != Some(gpui::WhiteSpace::Normal)
+            && matches!(node_cx.style.table.overflow.x, Some(Overflow::Scroll))
+        {
             Self::render_scroll_table(table, col_lens.len(), options, node_cx, window, cx)
         } else {
             Self::render_wrap_table(table, &col_lens, options, node_cx, window, cx)
@@ -1664,6 +1747,31 @@ impl BlockNode {
         // Measure the widest text per column.
         let text_style = window.text_style();
         let font_size = text_style.font_size.to_pixels(window.rem_size());
+        let padding = node_cx
+            .style
+            .table_cell
+            .padding
+            .left
+            .map(|v| f32::from(v.to_pixels(px(0.).into(), window.rem_size())))
+            .unwrap_or(CELL_PAD_PX / 2.)
+            + node_cx
+                .style
+                .table_cell
+                .padding
+                .right
+                .map(|v| f32::from(v.to_pixels(px(0.).into(), window.rem_size())))
+                .unwrap_or(CELL_PAD_PX / 2.);
+        let cached = table.column_widths.lock().ok().and_then(|cached| {
+            cached
+                .as_ref()
+                .filter(|cached| {
+                    cached.text_style == text_style
+                        && cached.rem_size == window.rem_size()
+                        && cached.padding == padding
+                        && cached.fill == node_cx.style.table_fill
+                })
+                .map(|cached| cached.widths.clone())
+        });
         let mut col_w = vec![
             if node_cx.style.table_fill {
                 CELL_MIN_PX
@@ -1672,101 +1780,91 @@ impl BlockNode {
             };
             col_count
         ];
-        for row in table.children.iter() {
-            for (ix, cell) in row.children.iter().enumerate() {
-                let Some(slot) = col_w.get_mut(ix) else {
-                    continue;
-                };
-                let mut w = 0.0_f32;
-                for line in cell.children.text().split('\n') {
-                    let line = line.trim();
-                    if line.is_empty() {
+        if let Some(cached) = cached {
+            col_w = cached;
+        } else {
+            for row in table.children.iter() {
+                for (ix, cell) in row.children.iter().enumerate() {
+                    let Some(slot) = col_w.get_mut(ix) else {
                         continue;
+                    };
+                    let mut w = 0.0_f32;
+                    for line in cell.children.text().split('\n') {
+                        let line = line.trim();
+                        if line.is_empty() {
+                            continue;
+                        }
+                        let run = text_style.to_run(line.len());
+                        let line_w = window
+                            .text_system()
+                            .layout_line(line, font_size, &[run], None)
+                            .width;
+                        w = w.max(f32::from(line_w));
                     }
-                    let run = text_style.to_run(line.len());
-                    let line_w = window
-                        .text_system()
-                        .layout_line(line, font_size, &[run], None)
-                        .width;
-                    w = w.max(f32::from(line_w));
+                    *slot = slot.max(w + padding);
                 }
-                let padding = node_cx
-                    .style
-                    .table_cell
-                    .padding
-                    .left
-                    .map(|v| f32::from(v.to_pixels(px(0.).into(), window.rem_size())))
-                    .unwrap_or(CELL_PAD_PX / 2.)
-                    + node_cx
-                        .style
-                        .table_cell
-                        .padding
-                        .right
-                        .map(|v| f32::from(v.to_pixels(px(0.).into(), window.rem_size())))
-                        .unwrap_or(CELL_PAD_PX / 2.);
-                *slot = slot.max(w + padding);
+            }
+            if let Ok(mut cached) = table.column_widths.lock() {
+                *cached = Some(TableColumnWidths {
+                    text_style: text_style.clone(),
+                    rem_size: window.rem_size(),
+                    padding,
+                    fill: node_cx.style.table_fill,
+                    widths: col_w.clone(),
+                });
             }
         }
         let total_w: f32 = col_w.iter().sum();
 
         let style = &node_cx.style;
-        let table_scroll_key = if let Some(span) = table.span {
-            SharedString::from(format!(
-                "{}-table-scroll-{}:{}",
-                window.current_view(),
-                span.start,
-                span.end
-            ))
-        } else {
-            SharedString::from(format!(
-                "{}-table-scroll-{}",
-                window.current_view(),
-                options.ix
-            ))
-        };
-        let scroll_handle = window
-            .use_keyed_state(table_scroll_key, cx, |_, _| ScrollHandle::default())
-            .read(cx)
-            .clone();
+        let table_scroll_key = table.scroll_key(options.ix, window);
+        let scroll_handle = node_cx.horizontal_scroll_handle(table_scroll_key, window, cx);
         let row_count = table.children.len();
-        let mut rows = Vec::with_capacity(row_count);
-        for (row_ix, row) in table.children.iter().enumerate() {
-            let mut cells = Vec::with_capacity(row.children.len());
-            for (ix, cell) in row.children.iter().enumerate() {
-                let align = table.column_align(ix);
-                let is_last_col = ix == row.children.len() - 1;
-                let width = col_w.get(ix).copied().unwrap_or(CELL_MIN_PX);
-                cells.push(
-                    div()
-                        .id(("cell", ix))
-                        // Measured content width is the flex-basis; `flex_grow`
-                        // (proportional to it) distributes any extra space so a
-                        // narrow table still fills the frame, while `flex_shrink_0`
-                        // keeps columns from collapsing when the table is wider
-                        // than the viewport and scrolls.
-                        .flex_basis(px(width))
-                        .flex_grow(if style.table_fill { width } else { 0. })
-                        .flex_shrink_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .when(align == ColumnumnAlign::Center, |this| this.text_center())
-                        .when(align == ColumnumnAlign::Right, |this| this.text_right())
-                        .px_2()
-                        .py_1()
-                        .when(!is_last_col, |this| {
-                            this.border_r_1().border_color(
-                                node_cx.style.border_color.unwrap_or(cx.theme().border),
-                            )
-                        })
-                        .refine_style(&style.table_cell)
-                        .when(row_ix == 0, |this| this.refine_style(&style.table_header))
-                        .child(cell.children.render(node_cx, window, cx)),
-                );
-            }
-            rows.push(
+        let render_row: super::table_rows::RenderRow = {
+            let table = table.clone();
+            let node_cx = node_cx.clone();
+            let col_w = col_w.clone();
+            Rc::new(move |row_ix, window, cx| {
+                let row = &table.children[row_ix];
+                let node_cx = &node_cx;
+                let style = &node_cx.style;
+                let mut cells = Vec::with_capacity(row.children.len());
+                for (ix, cell) in row.children.iter().enumerate() {
+                    let align = table.column_align(ix);
+                    let is_last_col = ix == row.children.len() - 1;
+                    let width = col_w.get(ix).copied().unwrap_or(CELL_MIN_PX);
+                    cells.push(
+                        div()
+                            .id(("cell", ix))
+                            // Measured content width is the flex-basis; `flex_grow`
+                            // (proportional to it) distributes any extra space so a
+                            // narrow table still fills the frame, while `flex_shrink_0`
+                            // keeps columns from collapsing when the table is wider
+                            // than the viewport and scrolls.
+                            .flex_basis(px(width))
+                            .flex_grow(if style.table_fill { width } else { 0. })
+                            .flex_shrink_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .when(align == ColumnumnAlign::Center, |this| this.text_center())
+                            .when(align == ColumnumnAlign::Right, |this| this.text_right())
+                            .px_2()
+                            .py_1()
+                            .when(!is_last_col, |this| {
+                                this.border_r_1().border_color(
+                                    node_cx.style.border_color.unwrap_or(cx.theme().border),
+                                )
+                            })
+                            .refine_style(&style.table_cell)
+                            .when(row_ix < table.header_rows, |this| {
+                                this.refine_style(&style.table_header)
+                            })
+                            .child(cell.children.render(node_cx, window, cx)),
+                    );
+                }
                 div()
                     .id(("row", row_ix))
-                    .when(row_ix > 0 && row_ix % 2 == 0, |this| {
+                    .when(table.striped(row_ix), |this| {
                         this.when_some(style.table_stripe, |this, color| this.bg(color))
                     })
                     .when_some(style.table_hover_background, |this, color| {
@@ -1782,9 +1880,37 @@ impl BlockNode {
                     )
                     .flex()
                     .flex_row()
-                    .children(cells),
-            );
-        }
+                    .children(cells)
+                    .into_any_element()
+            })
+        };
+        let rows = if row_count >= 40
+            && crate::global_state::GlobalState::global(cx)
+                .text_selection_probe
+                .is_none()
+            && !style.table_fill
+            && !table
+                .children
+                .iter()
+                .flat_map(|row| &row.children)
+                .flat_map(|cell| &cell.children.children)
+                .any(|node| node.image.is_some())
+        {
+            super::table_rows::rows(
+                &table.row_layout,
+                px(total_w - 2.),
+                row_count,
+                render_row,
+                style,
+                window,
+                cx,
+            )
+        } else {
+            div()
+                .w_full()
+                .children((0..row_count).map(|index| render_row(index, window, cx)))
+                .into_any_element()
+        };
 
         div()
             .pb(rems(1.))
@@ -1810,7 +1936,7 @@ impl BlockNode {
                         .border_1()
                         .border_color(node_cx.style.border_color.unwrap_or(cx.theme().border))
                         .rounded(style.table_radius.unwrap_or(cx.theme().radius))
-                        .children(rows),
+                        .child(rows),
                 ),
             )
             .into_any_element()
@@ -1830,43 +1956,57 @@ impl BlockNode {
 
         let style = &node_cx.style;
         let row_count = table.children.len();
-        let mut rows = Vec::with_capacity(row_count);
-        for (row_ix, row) in table.children.iter().enumerate() {
-            let mut cells = Vec::with_capacity(row.children.len());
-            for (ix, cell) in row.children.iter().enumerate() {
-                let align = table.column_align(ix);
-                let is_last_col = ix == row.children.len() - 1;
-                let len = col_lens
-                    .get(ix)
-                    .copied()
-                    .unwrap_or(MAX_LENGTH)
-                    .min(MAX_LENGTH);
+        let render_row: super::table_rows::RenderRow = {
+            let table = table.clone();
+            let col_lens = col_lens.to_vec();
+            let node_cx = node_cx.clone();
+            Rc::new(move |row_ix, window, cx| {
+                let row = &table.children[row_ix];
+                let node_cx = &node_cx;
+                let style = &node_cx.style;
+                let mut cells = Vec::with_capacity(row.children.len());
+                for (ix, cell) in row.children.iter().enumerate() {
+                    let align = table.column_align(ix);
+                    let is_last_col = ix == row.children.len() - 1;
+                    let len = col_lens
+                        .get(ix)
+                        .copied()
+                        .unwrap_or(MAX_LENGTH)
+                        .min(MAX_LENGTH);
 
-                cells.push(
-                    div()
-                        .id(("cell", ix))
-                        .overflow_hidden()
-                        .when(align == ColumnumnAlign::Center, |this| this.text_center())
-                        .when(align == ColumnumnAlign::Right, |this| this.text_right())
-                        .min_w_16()
-                        .w(Length::Definite(relative(len as f32)))
-                        .px_2()
-                        .py_1()
-                        .when(!is_last_col, |this| {
-                            this.border_r_1().border_color(
-                                node_cx.style.border_color.unwrap_or(cx.theme().border),
-                            )
-                        })
-                        .refine_style(&style.table_cell)
-                        .when(row_ix == 0, |this| this.refine_style(&style.table_header))
-                        .child(cell.children.render(node_cx, window, cx)),
-                );
-            }
+                    cells.push(
+                        div()
+                            .id(("cell", ix))
+                            .flex()
+                            .items_start()
+                            .overflow_hidden()
+                            .when(align == ColumnumnAlign::Center, |this| this.text_center())
+                            .when(align == ColumnumnAlign::Right, |this| this.text_right())
+                            .min_w_16()
+                            .w(Length::Definite(relative(len as f32)))
+                            .px_2()
+                            .py_1()
+                            .when(!is_last_col, |this| {
+                                this.border_r_1().border_color(
+                                    node_cx.style.border_color.unwrap_or(cx.theme().border),
+                                )
+                            })
+                            .refine_style(&style.table_cell)
+                            .when(row_ix < table.header_rows, |this| {
+                                this.refine_style(&style.table_header)
+                            })
+                            .child(
+                                div()
+                                    .w_full()
+                                    .whitespace_normal()
+                                    .child(cell.children.render(node_cx, window, cx)),
+                            ),
+                    );
+                }
 
-            rows.push(
                 div()
                     .id(("row", row_ix))
-                    .when(row_ix > 0 && row_ix % 2 == 0, |this| {
+                    .when(table.striped(row_ix), |this| {
                         this.when_some(style.table_stripe, |this, color| this.bg(color))
                     })
                     .when_some(style.table_hover_background, |this, color| {
@@ -1882,26 +2022,101 @@ impl BlockNode {
                     )
                     .flex()
                     .flex_row()
-                    .children(cells),
-            );
-        }
-
-        div()
-            .pb(rems(1.))
-            .when_some(style.table_gap, |el, gap| el.pb(gap))
-            .w_full()
-            .child(
-                div()
-                    .id(("table", options.ix))
-                    .w_full()
-                    .border_1()
-                    .border_color(node_cx.style.border_color.unwrap_or(cx.theme().border))
-                    .rounded(style.table_radius.unwrap_or(cx.theme().radius))
-                    .overflow_hidden()
-                    .children(rows)
-                    .refine_style(&style.table),
+                    .children(cells)
+                    .into_any_element()
+            })
+        };
+        let virtualize = row_count >= 40
+            && crate::global_state::GlobalState::global(cx)
+                .text_selection_probe
+                .is_none()
+            && !table
+                .children
+                .iter()
+                .flat_map(|row| &row.children)
+                .flat_map(|cell| &cell.children.children)
+                .any(|node| node.image.is_some());
+        let width = *table.wrap_width.lock().unwrap();
+        let rows = if let Some(width) = width.filter(|_| virtualize) {
+            super::table_rows::rows(
+                &table.row_layout,
+                width,
+                row_count,
+                render_row,
+                style,
+                window,
+                cx,
             )
-            .into_any_element()
+        } else {
+            div()
+                .w_full()
+                .children((0..row_count).map(|ix| render_row(ix, window, cx)))
+                .into_any_element()
+        };
+
+        let wrap_width = table.wrap_width.clone();
+        let state = node_cx.owner.clone();
+        let list_item = node_cx.list_item;
+        let owner = window.current_view();
+        let frame = div()
+            .id(("table", options.ix))
+            .w_full()
+            .border_1()
+            .border_color(node_cx.style.border_color.unwrap_or(cx.theme().border))
+            .rounded(style.table_radius.unwrap_or(cx.theme().radius))
+            .overflow_hidden()
+            .child(rows)
+            .when(virtualize, |frame| {
+                frame.on_prepaint(move |bounds, window, cx| {
+                    // on_prepaint's absolute canvas already excludes the frame border.
+                    let width = bounds.size.width;
+                    let mut previous = wrap_width.lock().unwrap();
+                    if *previous != Some(width) {
+                        *previous = Some(width);
+                        // The first frame supplies the actual flex-grid width.
+                        // Reuse measured row heights thereafter; defer list
+                        // invalidation until its current prepaint borrow ends.
+                        window.defer(cx, move |_, cx| {
+                            if let Some(state) = state.and_then(|state| state.upgrade()) {
+                                let state = state.read(cx);
+                                if let Some(index) = list_item.filter(|_| state.scrollable) {
+                                    state.list_state.remeasure_items(index..index + 1);
+                                }
+                            }
+                            cx.notify(owner);
+                        });
+                    }
+                })
+            });
+        let gap = style.table_gap.unwrap_or(window.rem_size());
+        if matches!(style.table.overflow.x, Some(Overflow::Scroll)) {
+            let scroll =
+                node_cx.horizontal_scroll_handle(table.scroll_key(options.ix, window), window, cx);
+            // Keep each column readable; tables with too many columns scroll.
+            // The bottom gap gives the native scrollbar room below the last row.
+            let track = div()
+                .w_full()
+                .min_w(window.rem_size() * (4. * col_lens.len() as f32))
+                .pb(gap.max(Scrollbar::width()))
+                .child(frame);
+            div()
+                .relative()
+                .w_full()
+                .child(horizontal_scroll_area(
+                    ("table-scroll", options.ix),
+                    &scroll,
+                    &style.table,
+                    track,
+                ))
+                .horizontal_scrollbar(&scroll)
+                .into_any_element()
+        } else {
+            div()
+                .w_full()
+                .pb(gap)
+                .child(frame.refine_style(&style.table))
+                .into_any_element()
+        }
     }
 
     pub(crate) fn render_block(

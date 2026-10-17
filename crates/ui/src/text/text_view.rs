@@ -46,6 +46,7 @@ pub struct TextView {
     style: StyleRefinement,
     selectable: bool,
     scrollable: bool,
+    show_scrollbar: bool,
     code_block_actions: Option<Arc<CodeBlockActionsFn>>,
     markdown_extensions: Arc<MarkdownExtensions>,
     interactions: super::interaction::TextViewInteractions,
@@ -87,6 +88,7 @@ impl TextView {
             style: StyleRefinement::default(),
             selectable: false,
             scrollable: false,
+            show_scrollbar: true,
             code_block_actions: None,
             markdown_extensions: Arc::default(),
             interactions: Default::default(),
@@ -105,6 +107,7 @@ impl TextView {
             state: None,
             selectable: false,
             scrollable: false,
+            show_scrollbar: true,
             code_block_actions: None,
             markdown_extensions: Arc::default(),
             interactions: Default::default(),
@@ -123,6 +126,7 @@ impl TextView {
             state: None,
             selectable: false,
             scrollable: false,
+            show_scrollbar: true,
             code_block_actions: None,
             markdown_extensions: Arc::default(),
             interactions: Default::default(),
@@ -156,6 +160,13 @@ impl TextView {
     /// This mode is suitable for small content, such as a few lines of text, a label, etc.
     pub fn scrollable(mut self, scrollable: bool) -> Self {
         self.scrollable = scrollable;
+        self
+    }
+
+    /// Hide the built-in scrollbar when the owner supplies one for the same list state.
+    /// Virtualized scrolling remains enabled by [`Self::scrollable`].
+    pub fn scrollbar_visible(mut self, visible: bool) -> Self {
+        self.show_scrollbar = visible;
         self
     }
 
@@ -330,6 +341,7 @@ impl Element for TextView {
             state.selectable = self.selectable;
             state.scrollable = self.scrollable;
             if state.text_view_style != self.text_view_style {
+                state.selection_geometry_key = None;
                 let selection = state.selection_snapshot();
                 state.text_view_style = self.text_view_style.clone();
                 if let Some(selection) = selection {
@@ -349,7 +361,9 @@ impl Element for TextView {
             .key_context("TextView")
             .track_focus(&focus_handle)
             .when(self.scrollable, |this| {
-                this.size_full().vertical_scrollbar(&list_state)
+                this.size_full().when(self.show_scrollbar, |this| {
+                    this.vertical_scrollbar(&list_state)
+                })
             })
             .relative()
             .on_action(move |_: &crate::input::Copy, window, cx| {
@@ -422,6 +436,156 @@ mod tests {
     }
 
     struct DummyTextViewPlugin;
+
+    struct VirtualTableView {
+        text: Entity<TextViewState>,
+        width: gpui::Pixels,
+        font: gpui::Pixels,
+    }
+
+    impl Render for VirtualTableView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let mut style = crate::text::TextViewStyle::default();
+            style.table.overflow.x = Some(gpui::Overflow::Scroll);
+            style.table_fill = false;
+            div().w(self.width).h(px(180.)).child(
+                TextView::new(&self.text)
+                    .text_size(self.font)
+                    .scrollable(true)
+                    .selectable(true)
+                    .style(style),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn virtual_table_links_selection_and_reflow(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let content = format!(
+            "| Link | Value |\n| --- | --- |\n{}",
+            (0..60)
+                .map(|i| format!(
+                    "| [row{i:02}](https://example.com/{i}) | 中文 value {} {} |\n",
+                    "wide-value-".repeat(40),
+                    if i % 2 == 0 { "one<br>two" } else { "three" }
+                ))
+                .collect::<String>()
+        );
+        let (root, vcx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| VirtualTableView {
+                text: cx.new(|cx| TextViewState::markdown(&content, cx)),
+                width: px(340.),
+                font: px(16.),
+            });
+            crate::Root::new(view, window, cx)
+        });
+        let view = root.read_with(vcx, |root, _| {
+            root.view().clone().downcast::<VirtualTableView>().unwrap()
+        });
+        let text = view.read_with(vcx, |view, _| view.text.clone());
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let line = root.read_with(vcx, |root, _| {
+            root.selectable_text_inlines[&text.entity_id()][2]
+        });
+        let link = gpui::point(line.left() + px(8.), line.center().y);
+        vcx.simulate_mouse_down(link, MouseButton::Left, Modifiers::none());
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        vcx.simulate_mouse_up(link, MouseButton::Left, Modifiers::none());
+        assert_eq!(vcx.opened_url().as_deref(), Some("https://example.com/0"));
+
+        vcx.simulate_event(gpui::ScrollWheelEvent {
+            position: gpui::point(px(150.), px(100.)),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(-160.), px(0.))),
+            modifiers: Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            text.read_with(vcx, |text, _| text
+                .parsed_content
+                .node_cx
+                .horizontal_scroll_offsets
+                .lock()
+                .unwrap()
+                .values()
+                .any(|offset| offset.x < px(-100.))),
+            "test must move the real table horizontally"
+        );
+        let start = gpui::point(px(30.), line.center().y);
+        vcx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        let end = gpui::point(px(150.), px(160.));
+        vcx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::none());
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        text.update(vcx, |text, cx| {
+            text.list_state.scroll_by(px(600.));
+            cx.notify();
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        vcx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::none());
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let extended = text.read_with(vcx, |text, _| text.selected_text());
+        assert!(
+            extended.contains("row01") && extended.contains("row08") && extended.contains("中文"),
+            "cross-screen selection must include intervening UTF-8 rows: {extended}"
+        );
+        text.update(vcx, |text, cx| {
+            text.list_state.scroll_to(Default::default());
+            cx.notify();
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        vcx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::none());
+        vcx.simulate_mouse_up(end, MouseButton::Left, Modifiers::none());
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let shortened = text.read_with(vcx, |text, _| text.selected_text());
+        assert!(
+            shortened.contains("row01") && !shortened.contains("row08"),
+            "shortening must clear offscreen ranges: {shortened}"
+        );
+        vcx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        vcx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::none());
+        vcx.simulate_mouse_up(end, MouseButton::Left, Modifiers::none());
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            text.read_with(vcx, |text, _| text.selected_text()),
+            shortened
+        );
+        let before = text.read_with(vcx, |text, _| text.list_state.max_offset_for_scrollbar().y);
+        view.update(vcx, |view, cx| {
+            view.width = px(220.);
+            view.font = px(28.);
+            cx.notify();
+        });
+        text.update(vcx, |text, cx| {
+            text.list_state.reset(text.list_state.item_count());
+            cx.notify();
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let after = text.read_with(vcx, |text, _| text.list_state.max_offset_for_scrollbar().y);
+        assert!(
+            after > before,
+            "larger fonts must invalidate the cached row geometry"
+        );
+    }
 
     impl TextViewPlugin for DummyTextViewPlugin {
         fn setup(self, mut text_view: TextView) -> TextView {

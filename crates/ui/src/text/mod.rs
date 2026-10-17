@@ -1,3 +1,4 @@
+mod aligned_layout;
 mod document;
 mod format;
 mod inline;
@@ -10,6 +11,7 @@ mod reading_tests;
 pub(crate) mod selection;
 mod state;
 mod style;
+mod table_rows;
 mod text_view;
 mod utils;
 mod window_selection;
