@@ -1,3 +1,4 @@
+mod aligned_layout;
 mod document;
 mod format;
 mod inline;

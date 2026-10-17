@@ -8,10 +8,11 @@ use std::{
 use gpui::{
     App, BorderStyle, Bounds, CursorStyle, Edges, Element, ElementId, GlobalElementId, Half,
     HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, StyledText,
-    TextLayout, Window, point, px, quad,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, StyledText, Window,
+    point, px, quad,
 };
 
+use super::aligned_layout::AlignedTextLayout as TextLayout;
 use crate::{
     ActiveTheme, WindowExt as _, global_state::GlobalState, input::Selection,
     text::TextViewMultiClickKind, text::node::LinkMark, text::selection::word_range_at,
@@ -638,7 +639,12 @@ impl Element for Inline {
             .prepaint(id, inspector_id, bounds, &mut (), window, cx);
 
         if let Some((start, end)) = GlobalState::global(cx).text_selection_probe {
-            let selection = self.selection_range(&self.styled_text.layout(), start, end);
+            let layout = TextLayout::new(
+                self.styled_text.layout().clone(),
+                &self.text,
+                window.text_style().text_align,
+            );
+            let selection = self.selection_range(&layout, start, end);
             if let Ok(mut state) = self.state.lock() {
                 state.selection = selection;
             }
@@ -664,7 +670,11 @@ impl Element for Inline {
             return;
         };
 
-        let text_layout = self.styled_text.layout().clone();
+        let text_layout = TextLayout::new(
+            self.styled_text.layout().clone(),
+            &self.text,
+            window.text_style().text_align,
+        );
         // Chips go behind the text, their border over it.
         let chips = self.code_chips(&text_layout, &bounds);
         for chip in &chips {
