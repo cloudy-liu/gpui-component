@@ -4,11 +4,12 @@ on:
   push:
     branches:
       - main
+      - ctty7
     tags:
       - "*"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
+  group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.sha }}
   cancel-in-progress: true
 
 jobs:
