@@ -7,14 +7,14 @@ use crate::{
     notification::{Notification, NotificationList},
     sheet::Sheet,
     text::{TextSelectionController, TextViewState, WindowTextSelection},
-    tooltip::TooltipOverlay,
+    tooltip::{TooltipBoundsChanged, TooltipOverlay},
     window_border,
 };
 use gpui::{
     Anchor, AnyView, App, AppContext, Bounds, ClipboardItem, Context, DefiniteLength, ElementId,
     Entity, EntityId, FocusHandle, Hitbox, InteractiveElement, IntoElement, KeyBinding,
-    ParentElement as _, Pixels, Render, StyleRefinement, Styled, WeakEntity, WeakFocusHandle,
-    Window, actions, div, prelude::FluentBuilder as _,
+    ParentElement as _, Pixels, Render, StyleRefinement, Styled, Subscription, WeakEntity,
+    WeakFocusHandle, Window, actions, div, prelude::FluentBuilder as _,
 };
 use std::{any::TypeId, collections::HashMap, rc::Rc};
 
@@ -434,6 +434,21 @@ impl Root {
     pub(crate) fn tooltip_overlay(window: &Window, cx: &App) -> Option<Entity<TooltipOverlay>> {
         let root = window.root::<Root>()??;
         Some(root.read(cx).tooltip_overlay.clone())
+    }
+
+    /// Observe tooltip footprints after layout and animation positioning.
+    /// `None` restores an unobstructed native child when the tooltip disappears.
+    pub fn observe_tooltip_bounds(
+        window: &Window,
+        cx: &mut App,
+        mut on_change: impl FnMut(Option<Bounds<Pixels>>, &mut App) + 'static,
+    ) -> Option<Subscription> {
+        let overlay = Self::tooltip_overlay(window, cx)?;
+        Some(
+            cx.subscribe(&overlay, move |_, event: &TooltipBoundsChanged, cx| {
+                on_change(event.0, cx);
+            }),
+        )
     }
 
     /// Get the fallback native-menu overlay entity for this window.

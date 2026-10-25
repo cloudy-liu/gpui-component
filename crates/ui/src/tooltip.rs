@@ -2,13 +2,14 @@ use std::{cell::Cell, rc::Rc, time::Duration};
 
 use gpui::{
     Action, AnyElement, AnyView, App, AppContext, Bounds, Context, Display, Element, ElementId,
-    GlobalElementId, Half, InspectorElementId, IntoElement, LayoutId, MouseButton, ParentElement,
-    Pixels, Point, Position, Render, SharedString, Size, StatefulInteractiveElement, Style,
-    StyleRefinement, Styled, Task, Window, deferred, div, point, prelude::FluentBuilder, px,
+    EntityId, EventEmitter, GlobalElementId, Half, InspectorElementId, IntoElement, LayoutId,
+    MouseButton, ParentElement, Pixels, Point, Position, Render, SharedString, Size,
+    StatefulInteractiveElement, Style, StyleRefinement, Styled, Task, Window, deferred, div, point,
+    prelude::FluentBuilder, px,
 };
 
 use crate::{
-    ActiveTheme, StyledExt,
+    ActiveTheme, ElementExt as _, StyledExt,
     animation::{Transition, ease_in_out_cubic, ease_out_cubic},
     h_flex,
     kbd::Kbd,
@@ -76,8 +77,19 @@ impl Tooltip {
     }
 
     /// Build the tooltip and return it as an `AnyView`.
-    pub fn build(self, _: &mut Window, cx: &mut App) -> AnyView {
-        cx.new(|_| self).into()
+    pub fn build(self, window: &mut Window, cx: &mut App) -> AnyView {
+        let overlay = Root::tooltip_overlay(window, cx).map(|overlay| overlay.downgrade());
+        cx.new(|cx| {
+            let id = cx.entity_id();
+            cx.on_release_in(window, move |_, _, cx| {
+                if let Some(overlay) = overlay {
+                    let _ = overlay.update(cx, |overlay, cx| overlay.set_bounds(id, None, cx));
+                }
+            })
+            .detach();
+            self
+        })
+        .into()
     }
 }
 
@@ -89,6 +101,7 @@ impl Styled for Tooltip {
 }
 impl Render for Tooltip {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let id = cx.entity_id();
         let key_binding = if let Some(key_binding) = &self.key_binding {
             Some(key_binding.clone())
         } else {
@@ -103,51 +116,58 @@ impl Render for Tooltip {
             }
         };
 
-        div().child(
-            // Wrap in a child, to ensure the left margin is applied to the tooltip
-            h_flex()
-                .font_family(cx.theme().font_family.clone())
-                .m_3()
-                .bg(cx.theme().tokens.popover)
-                .text_color(cx.theme().popover_foreground)
-                .border_1()
-                // A hairline, like the menu's separators: the tooltip already
-                // reads as a floating card from its shadow, and a full-strength
-                // `border` around a two-word label drew a box that was darker
-                // than the label inside it.
-                .border_color(cx.theme().border.opacity(0.6))
-                .shadow_lg()
-                // Follow the theme instead of pinning 6px. Every other floating
-                // surface in the window is on the theme radius or a touch over
-                // it (the menu panel is 10), so a tooltip stuck at 6 was the one
-                // corner that did not match — and on a square-cornered theme it
-                // stayed round.
-                .rounded(cx.theme().radius.min(px(8.)))
-                .justify_between()
-                // 2px above and below a 14px line left the text touching the
-                // border. 4/10 gives the label the same breathing room a menu
-                // row has.
-                .py_1()
-                .px_2p5()
-                .text_sm()
-                .gap_2()
-                .refine_style(&self.style)
-                .map(|this| {
-                    this.child(div().map(|this| match self.content {
-                        TooltipContext::Text(ref text) => this.child(text.clone()),
-                        TooltipContext::Element(ref builder) => this.child(builder(window, cx)),
-                    }))
-                })
-                .when_some(key_binding, |this, kbd| {
-                    this.child(
-                        div()
-                            .text_xs()
-                            .flex_shrink_0()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(kbd.appearance(false)),
-                    )
-                }),
-        )
+        div()
+            .relative()
+            .on_prepaint(move |bounds, window, cx| {
+                if let Some(overlay) = Root::tooltip_overlay(window, cx) {
+                    overlay.update(cx, |overlay, cx| overlay.set_bounds(id, Some(bounds), cx));
+                }
+            })
+            .child(
+                // Wrap in a child, to ensure the left margin is applied to the tooltip
+                h_flex()
+                    .font_family(cx.theme().font_family.clone())
+                    .m_3()
+                    .bg(cx.theme().tokens.popover)
+                    .text_color(cx.theme().popover_foreground)
+                    .border_1()
+                    // A hairline, like the menu's separators: the tooltip already
+                    // reads as a floating card from its shadow, and a full-strength
+                    // `border` around a two-word label drew a box that was darker
+                    // than the label inside it.
+                    .border_color(cx.theme().border.opacity(0.6))
+                    .shadow_lg()
+                    // Follow the theme instead of pinning 6px. Every other floating
+                    // surface in the window is on the theme radius or a touch over
+                    // it (the menu panel is 10), so a tooltip stuck at 6 was the one
+                    // corner that did not match — and on a square-cornered theme it
+                    // stayed round.
+                    .rounded(cx.theme().radius.min(px(8.)))
+                    .justify_between()
+                    // 2px above and below a 14px line left the text touching the
+                    // border. 4/10 gives the label the same breathing room a menu
+                    // row has.
+                    .py_1()
+                    .px_2p5()
+                    .text_sm()
+                    .gap_2()
+                    .refine_style(&self.style)
+                    .map(|this| {
+                        this.child(div().map(|this| match self.content {
+                            TooltipContext::Text(ref text) => this.child(text.clone()),
+                            TooltipContext::Element(ref builder) => this.child(builder(window, cx)),
+                        }))
+                    })
+                    .when_some(key_binding, |this, kbd| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .flex_shrink_0()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(kbd.appearance(false)),
+                        )
+                    }),
+            )
     }
 }
 
@@ -373,6 +393,7 @@ pub(crate) struct TooltipContent {
 /// via [`ManagedTooltipExt::managed_tooltip`] which calls into this overlay.
 pub struct TooltipOverlay {
     content: Option<TooltipContent>,
+    bounds: Option<(EntityId, Bounds<Pixels>)>,
     prev_trigger_bounds: Option<Bounds<Pixels>>,
     epoch: usize,
     had_recent_tooltip: bool,
@@ -383,10 +404,18 @@ pub struct TooltipOverlay {
     _hide_task: Option<Task<()>>,
 }
 
+/// A tooltip footprint in window coordinates, including its shadow margin.
+/// Native child views can exclude this area from their drawing region.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TooltipBoundsChanged(pub Option<Bounds<Pixels>>);
+
+impl EventEmitter<TooltipBoundsChanged> for TooltipOverlay {}
+
 impl TooltipOverlay {
     pub fn new() -> Self {
         Self {
             content: None,
+            bounds: None,
             prev_trigger_bounds: None,
             epoch: 0,
             had_recent_tooltip: false,
@@ -394,6 +423,18 @@ impl TooltipOverlay {
             is_switching: false,
             _show_task: None,
             _hide_task: None,
+        }
+    }
+
+    fn set_bounds(&mut self, id: EntityId, bounds: Option<Bounds<Pixels>>, cx: &mut Context<Self>) {
+        // Releasing the previous tooltip must not clear its replacement.
+        if bounds.is_none() && self.bounds.is_none_or(|(active, _)| active != id) {
+            return;
+        }
+        let previous = self.bounds.map(|(_, bounds)| bounds);
+        self.bounds = bounds.map(|bounds| (id, bounds));
+        if previous != bounds {
+            cx.emit(TooltipBoundsChanged(bounds));
         }
     }
 
