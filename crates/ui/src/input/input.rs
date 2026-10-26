@@ -11,6 +11,7 @@ use gpui::{
 use crate::button::{Button, ButtonVariants as _};
 use crate::input::clear_button;
 use crate::native_menu::NativeMenu;
+use crate::scroll::ScrollbarShow;
 use crate::spinner::Spinner;
 use crate::{ActiveTheme, Colorize, v_flex};
 use crate::{IconName, Size};
@@ -83,6 +84,7 @@ pub struct Input {
     tab_index: isize,
     selected: bool,
     editor_style: Option<Arc<CodeEditorStyle>>,
+    scrollbar_show: Option<ScrollbarShow>,
 
     /// An optional context menu builder to allow a custom context menu on the input.
     ///
@@ -127,6 +129,7 @@ impl Input {
             tab_index: 0,
             selected: false,
             editor_style: None,
+            scrollbar_show: None,
             context_menu_builder: None,
         }
     }
@@ -140,6 +143,13 @@ impl Input {
     /// The editor background is painted even when `appearance(false)` is used.
     pub fn editor_style(mut self, style: Arc<CodeEditorStyle>) -> Self {
         self.editor_style = Some(style);
+        self
+    }
+
+    /// Override scrollbar visibility for this multi-line input.
+    /// By default, scrollbars follow the application theme.
+    pub fn scrollbar_show(mut self, show: ScrollbarShow) -> Self {
+        self.scrollbar_show = Some(show);
         self
     }
 
@@ -237,6 +247,7 @@ impl Input {
     /// This method must after the refine_style.
     fn render_editor(
         paddings: EdgesRefinement<DefiniteLength>,
+        scrollbar_show: Option<ScrollbarShow>,
         input_state: &Entity<InputState>,
         state: &InputState,
         window: &Window,
@@ -274,7 +285,7 @@ impl Input {
                     .relative()
                     .flex_1()
                     .child(input_state.clone())
-                    .child(EditorScrollbar::new(input_state.clone())),
+                    .child(EditorScrollbar::new(input_state.clone(), scrollbar_show)),
             )
     }
 }
@@ -468,7 +479,13 @@ impl RenderOnce for Input {
             }))
             .when(state.mode.is_multi_line(), |mut this| {
                 let paddings = this.style().padding.clone();
-                this.child(Self::render_editor(paddings, &self.state, &state, window))
+                this.child(Self::render_editor(
+                    paddings,
+                    self.scrollbar_show,
+                    &self.state,
+                    &state,
+                    window,
+                ))
             })
             .when(!state.mode.is_multi_line(), |this| {
                 this.child(self.state.clone())
