@@ -9,9 +9,9 @@ use crate::{
 };
 use gpui::{
     AnyElement, App, Background, ClickEvent, Corners, Div, Edges, ElementId, Hsla,
-    InteractiveElement, Interactivity, IntoElement, MouseButton, ParentElement, Pixels,
-    RenderOnce, SharedString, Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled,
-    Window, div, prelude::FluentBuilder as _, px, relative, transparent_white,
+    InteractiveElement, Interactivity, IntoElement, MouseButton, ParentElement, Pixels, RenderOnce,
+    SharedString, Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled, Window, div,
+    prelude::FluentBuilder as _, px, relative, transparent_white,
 };
 
 #[derive(Default, Clone, Copy)]

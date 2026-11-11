@@ -127,11 +127,12 @@ impl Render for Tooltip {
                 // Wrap in a child, to ensure the left margin is applied to the tooltip
                 h_flex()
                     .font_family(cx.theme().font_family.clone())
-                    // 6px off the trigger, not 12. This margin is the whole gap
-                    // between a control and its hint, and at 12 a two-word hint
-                    // floated far enough from the tile that said it to read as a
-                    // panel of its own.
-                    .m_1p5()
+                    // Clearance for the cursor, not the gap to a control: a
+                    // pointer-anchored tooltip opens a pixel off the arrow and
+                    // this is all that keeps the box out from under it. The
+                    // overlay takes half of it back for a tooltip anchored to a
+                    // control (`trigger_inset`).
+                    .m_3()
                     .bg(cx.theme().tokens.popover)
                     .text_color(cx.theme().popover_foreground)
                     .border_1()
@@ -193,6 +194,17 @@ const ENTER_DURATION: Duration = Duration::from_millis(150);
 const SLIDE_DURATION: Duration = Duration::from_millis(200);
 const TOOLTIP_WINDOW_MARGIN: Pixels = px(4.);
 
+/// Half of the view's `m_3`, taken back when the tooltip is anchored to a
+/// control. The view keeps the full margin because gpui opens a
+/// pointer-anchored tooltip one pixel off the cursor, and the margin is the
+/// only thing holding the box clear of the arrow. A control has no arrow to
+/// clear: at the full margin a two-word hint sat far enough from the tile
+/// that said it to read as a panel of its own. In rems, like the margin, so
+/// the gap follows the interface size.
+fn trigger_inset(window: &Window) -> Pixels {
+    window.rem_size() * 0.375
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum TooltipPlacement {
     Above,
@@ -205,18 +217,28 @@ struct TooltipOverlayPosition {
     placement: TooltipPlacement,
 }
 
+/// `inset` is how much of the tooltip's own margin the overlay takes back.
+/// `tooltip_size` includes that margin, so without it the visible box floats
+/// the whole margin off the control that owns it.
 fn tooltip_overlay_position(
     trigger_bounds: Bounds<Pixels>,
     tooltip_size: Size<Pixels>,
     viewport_size: Size<Pixels>,
     margin: Pixels,
+    inset: Pixels,
 ) -> TooltipOverlayPosition {
     let centered_x = trigger_bounds.center().x - tooltip_size.width.half();
     let above_bounds = Bounds::new(
-        point(centered_x, trigger_bounds.top() - tooltip_size.height),
+        point(
+            centered_x,
+            trigger_bounds.top() - tooltip_size.height + inset,
+        ),
         tooltip_size,
     );
-    let below_bounds = Bounds::new(point(centered_x, trigger_bounds.bottom()), tooltip_size);
+    let below_bounds = Bounds::new(
+        point(centered_x, trigger_bounds.bottom() - inset),
+        tooltip_size,
+    );
 
     let bottom_limit = (viewport_size.height - margin).max(margin);
     let available_above = (trigger_bounds.top() - margin).max(px(0.));
@@ -354,6 +376,7 @@ impl Element for TooltipOverlayPositioner {
             tooltip_size,
             window.viewport_size(),
             TOOLTIP_WINDOW_MARGIN + client_inset,
+            trigger_inset(window),
         );
 
         let offset = tooltip_position.bounds.origin - bounds.origin;
@@ -742,6 +765,7 @@ mod tests {
             test_size(120., 30.),
             test_size(300., 200.),
             TOOLTIP_WINDOW_MARGIN,
+            px(0.),
         );
 
         assert_eq!(position.placement, TooltipPlacement::Above);
@@ -758,6 +782,7 @@ mod tests {
             test_size(240., 32.),
             test_size(520., 260.),
             TOOLTIP_WINDOW_MARGIN,
+            px(0.),
         );
 
         assert_eq!(position.placement, TooltipPlacement::Below);
@@ -773,6 +798,7 @@ mod tests {
             test_size(120., 30.),
             test_size(300., 200.),
             TOOLTIP_WINDOW_MARGIN,
+            px(0.),
         );
 
         assert_eq!(position.placement, TooltipPlacement::Above);
@@ -787,10 +813,42 @@ mod tests {
             test_size(160., 120.),
             test_size(300., 100.),
             TOOLTIP_WINDOW_MARGIN,
+            px(0.),
         );
 
         assert_eq!(position.placement, TooltipPlacement::Below);
         assert_eq!(position.bounds.top(), TOOLTIP_WINDOW_MARGIN);
         assert_eq!(position.bounds.left(), px(60.));
+    }
+
+    #[test]
+    fn tooltip_overlay_position_takes_the_inset_back_above_the_trigger() {
+        let trigger_bounds = test_bounds(100., 80., 80., 24.);
+        let position = tooltip_overlay_position(
+            trigger_bounds,
+            test_size(120., 30.),
+            test_size(300., 200.),
+            TOOLTIP_WINDOW_MARGIN,
+            px(6.),
+        );
+
+        assert_eq!(position.placement, TooltipPlacement::Above);
+        assert_eq!(position.bounds.origin.x, px(80.));
+        assert_eq!(position.bounds.bottom(), trigger_bounds.top() + px(6.));
+    }
+
+    #[test]
+    fn tooltip_overlay_position_takes_the_inset_back_below_the_trigger() {
+        let trigger_bounds = test_bounds(24., 4., 120., 32.);
+        let position = tooltip_overlay_position(
+            trigger_bounds,
+            test_size(240., 32.),
+            test_size(520., 260.),
+            TOOLTIP_WINDOW_MARGIN,
+            px(6.),
+        );
+
+        assert_eq!(position.placement, TooltipPlacement::Below);
+        assert_eq!(position.bounds.top(), trigger_bounds.bottom() - px(6.));
     }
 }
