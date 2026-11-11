@@ -151,12 +151,12 @@ impl Render for Tooltip {
                     // stayed round.
                     .rounded(cx.theme().radius.min(px(8.)))
                     .justify_between()
-                    // A hint is one step under the text it explains: 12px on the
-                    // 16px line `text_xs` carries. At `text_sm` the hint matched
-                    // the sidebar's own labels and came out as the loudest thing
-                    // near the tile. 2px above and below a line that size left the
-                    // text touching the border; 4/8 gives it the breathing room a
-                    // menu row has.
+                    // A hint is one step under the text it explains: `text_xs`,
+                    // 12px at the default scale. At `text_sm` it was set in the
+                    // size of the labels around it and came out as the loudest
+                    // thing near its trigger. 2px above and below left the text
+                    // touching the border; 4/8 gives it the breathing room a menu
+                    // row has.
                     .py_1()
                     .px_2()
                     .text_xs()
