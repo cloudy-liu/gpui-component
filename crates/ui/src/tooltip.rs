@@ -127,7 +127,11 @@ impl Render for Tooltip {
                 // Wrap in a child, to ensure the left margin is applied to the tooltip
                 h_flex()
                     .font_family(cx.theme().font_family.clone())
-                    .m_3()
+                    // 6px off the trigger, not 12. This margin is the whole gap
+                    // between a control and its hint, and at 12 a two-word hint
+                    // floated far enough from the tile that said it to read as a
+                    // panel of its own.
+                    .m_1p5()
                     .bg(cx.theme().tokens.popover)
                     .text_color(cx.theme().popover_foreground)
                     .border_1()
@@ -136,7 +140,10 @@ impl Render for Tooltip {
                     // `border` around a two-word label drew a box that was darker
                     // than the label inside it.
                     .border_color(cx.theme().border.opacity(0.6))
-                    .shadow_lg()
+                    // One step down from `lg`. A hint is the smallest thing the
+                    // window has to say, and a shadow that deep spent more ink
+                    // announcing it than the hint itself carried.
+                    .shadow_md()
                     // Follow the theme instead of pinning 6px. Every other floating
                     // surface in the window is on the theme radius or a touch over
                     // it (the menu panel is 10), so a tooltip stuck at 6 was the one
@@ -144,12 +151,15 @@ impl Render for Tooltip {
                     // stayed round.
                     .rounded(cx.theme().radius.min(px(8.)))
                     .justify_between()
-                    // 2px above and below a 14px line left the text touching the
-                    // border. 4/10 gives the label the same breathing room a menu
-                    // row has.
+                    // A hint is one step under the text it explains: 12px on the
+                    // 16px line `text_xs` carries. At `text_sm` the hint matched
+                    // the sidebar's own labels and came out as the loudest thing
+                    // near the tile. 2px above and below a line that size left the
+                    // text touching the border; 4/8 gives it the breathing room a
+                    // menu row has.
                     .py_1()
-                    .px_2p5()
-                    .text_sm()
+                    .px_2()
+                    .text_xs()
                     .gap_2()
                     .refine_style(&self.style)
                     .map(|this| {

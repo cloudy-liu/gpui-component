@@ -9,7 +9,7 @@ use crate::{
 };
 use gpui::{
     AnyElement, App, Background, ClickEvent, Corners, Div, Edges, ElementId, Hsla,
-    InteractiveElement, Interactivity, IntoElement, MouseButton, ParentElement, Pixels, Render,
+    InteractiveElement, Interactivity, IntoElement, MouseButton, ParentElement, Pixels,
     RenderOnce, SharedString, Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled,
     Window, div, prelude::FluentBuilder as _, px, relative, transparent_white,
 };
@@ -324,10 +324,16 @@ impl Button {
     /// shortcut renders as a shortcut instead of being concatenated into the
     /// label. The `tooltip_builder` this fills was already read in `render`;
     /// until now nothing could set it.
+    ///
+    /// Built either way: an `Entity` for content a caller keeps, or the
+    /// `AnyView` [`Tooltip::build`] hands back. The latter is the one that
+    /// registers with the overlay's release hook, so a tooltip built by hand as
+    /// an `Entity` reports no bounds on the way out and leaves the region it
+    /// covered excluded from any native child beneath it.
     pub fn tooltip_element<F, V>(mut self, builder: F) -> Self
     where
-        F: Fn(&mut Window, &mut App) -> gpui::Entity<V> + 'static,
-        V: Render,
+        F: Fn(&mut Window, &mut App) -> V + 'static,
+        V: Into<gpui::AnyView>,
     {
         self.tooltip_builder = Some(Rc::new(move |window, cx| builder(window, cx).into()));
         self
